@@ -10,7 +10,7 @@ struct ContentView: View {
     @State private var permissionAlert = false
     @State private var tempMOVURL: URL?
     @State private var mixedM4AURL: URL?
-    @State private var transcript: String = ""
+    @State private var transcriptState = TranscriptState()
     @State private var status: String = "Idle"
     @State private var systemGain: Float = 1.0
     @State private var micGain: Float = 1.0
@@ -83,18 +83,10 @@ struct ContentView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
 
-                if !transcript.isEmpty {
+                if !transcriptState.displayText.isEmpty {
                     Text("Transcript (live):")
                         .font(.headline)
-                    ScrollView {
-                        Text(transcript)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .padding(8)
-                            .background(Color.gray.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    .frame(minHeight: 120, maxHeight: 240)
+                    TranscriptView(transcript: $transcriptState)
                 }
             }
 
@@ -123,7 +115,7 @@ struct ContentView: View {
                         stopRecording()
                     } else {
                         // If there is existing audio or transcript, offer to save
-                        if mixedM4AURL != nil || !transcript.isEmpty {
+                        if mixedM4AURL != nil || !transcriptState.isEmpty {
                             showSaveBeforeRecordingPrompt = true
                         } else {
                             startRecording()
@@ -147,7 +139,7 @@ struct ContentView: View {
                 Button("Save Transcript…") {
                     saveTranscript()
                 }
-                .disabled(transcript.isEmpty)
+                .disabled(transcriptState.isEmpty)
             }
 
             // File locations
@@ -172,9 +164,9 @@ struct ContentView: View {
         ) {
             Button("Save Audio…") { saveAudio() }
             Button("Save Transcript…") { saveTranscript() }
-                .disabled(transcript.isEmpty)
+                .disabled(transcriptState.isEmpty)
             Button("Discard", role: .destructive) {
-                transcript = ""
+                transcriptState = TranscriptState()
                 lastTranscriptCount = 0
                 mixedM4AURL = nil
                 status = "Starting new recording..."
@@ -235,7 +227,7 @@ struct ContentView: View {
 
     private func startRecording() {
         status = "Preparing recording..."
-        transcript = ""
+        transcriptState = TranscriptState()
         mixedM4AURL = nil
 
         let tmp = FileManager.default.temporaryDirectory
@@ -304,7 +296,7 @@ struct ContentView: View {
         status = "Transcribing..."
 
         isTranscribing = true
-        transcript = ""
+        transcriptState = TranscriptState()
         lastTranscriptCount = 0
 
         switch provider {
@@ -318,10 +310,10 @@ struct ContentView: View {
                         if partial.count >= lastTranscriptCount {
                             let startIndex = partial.index(partial.startIndex, offsetBy: lastTranscriptCount)
                             let delta = String(partial[startIndex...])
-                            if !delta.isEmpty { transcript += delta }
+                            if !delta.isEmpty { transcriptState.appendToRawText(delta) }
                             lastTranscriptCount = partial.count
                         } else {
-                            transcript = partial
+                            transcriptState.updateRawText(partial)
                             lastTranscriptCount = partial.count
                         }
                     }
@@ -333,7 +325,7 @@ struct ContentView: View {
                             if full.count >= lastTranscriptCount {
                                 let startIndex = full.index(full.startIndex, offsetBy: lastTranscriptCount)
                                 let delta = String(full[startIndex...])
-                                if !delta.isEmpty { transcript += delta }
+                                if !delta.isEmpty { transcriptState.appendToRawText(delta) }
                                 lastTranscriptCount = full.count
                             }
                             status = "Transcription complete. (Apple)"
@@ -366,9 +358,9 @@ struct ContentView: View {
             ) { result in
                 DispatchQueue.main.async {
                     switch result {
-                    case .success(let text):
-                        transcript = text
-                        lastTranscriptCount = text.count
+                    case .success(let state):
+                        transcriptState = state
+                        lastTranscriptCount = state.displayText.count
                         status = "Transcription complete. (OpenAI)"
                     case .failure(let error):
                         status = "OpenAI failed: \(error.localizedDescription)"
@@ -404,21 +396,30 @@ struct ContentView: View {
     }
 
     private func saveTranscript() {
-        guard !transcript.isEmpty else { return }
+        guard !transcriptState.isEmpty else { return }
         #if os(macOS)
+        let stateToSave = transcriptState
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType.plainText]
-        panel.nameFieldStringValue = "transcript.txt"
+        panel.allowedContentTypes = [UTType.plainText, UTType.json]
+        panel.nameFieldStringValue = stateToSave.hasSpeakerLabels ? "transcript.json" : "transcript.txt"
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.begin { response in
             if response == .OK, let dest = panel.url {
                 do {
-                    let data = transcript.data(using: .utf8) ?? Data()
                     if FileManager.default.fileExists(atPath: dest.path) {
                         try FileManager.default.removeItem(at: dest)
                     }
-                    try data.write(to: dest)
+                    let ext = dest.pathExtension.lowercased()
+                    if ext == "json" {
+                        let encoder = JSONEncoder()
+                        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                        let data = try encoder.encode(stateToSave)
+                        try data.write(to: dest)
+                    } else {
+                        let data = stateToSave.plainTextExport.data(using: .utf8) ?? Data()
+                        try data.write(to: dest)
+                    }
                 } catch {
                     DispatchQueue.main.async { status = "Save failed: \(error.localizedDescription)" }
                 }
