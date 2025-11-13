@@ -169,6 +169,7 @@ struct OpenAITranscriber {
         knownSpeakers: [KnownSpeaker]? = nil,
         onProgress: ((String) -> Void)? = nil,
         completion: @escaping (Result<Transcript, Error>) -> Void
+        completion: @escaping (Result<TranscriptState, Error>) -> Void
     ) {
         // Use provided key if present; otherwise fall back to saved key
         var effectiveAPIKey = apiKey
@@ -308,6 +309,7 @@ struct OpenAITranscriber {
                 let diarizedSegments = decoded.segments ?? decoded.diarization?.segments
                 if let segments = diarizedSegments, !segments.isEmpty {
                     let convertedSegments = segments.map { seg in
+                    let mappedSegments: [TranscriptSegment] = segments.map { seg in
                         TranscriptSegment(
                             speakerLabel: seg.speaker,
                             text: seg.text,
@@ -326,6 +328,10 @@ struct OpenAITranscriber {
                         aliasMap: decoded.speakerMap ?? [:]
                     )
                     completion(.success(transcript))
+                    let state = TranscriptState(segments: mappedSegments, rawText: decoded.text ?? "")
+                    completion(.success(state))
+                } else if let text = decoded.text {
+                    completion(.success(TranscriptState(rawText: text)))
                 } else {
                     self.logError("No text or segments found in response JSON")
                     completion(.failure(OpenAIError.invalidResponse))
@@ -340,6 +346,7 @@ struct OpenAITranscriber {
                         aliasMap: [:]
                     )
                     completion(.success(transcript))
+                    completion(.success(TranscriptState(rawText: text)))
                 } else {
                     self.logError("No decodable JSON and empty body; failing with decode error")
                     completion(.failure(error))
@@ -357,6 +364,7 @@ struct OpenAITranscriber {
         knownSpeakers: [KnownSpeaker]? = nil,
         onProgress: ((String) -> Void)? = nil
     ) async throws -> Transcript {
+    ) async throws -> TranscriptState {
         return try await withCheckedThrowingContinuation { continuation in
             transcribeDiarized(
                 audioURL: audioURL,

@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var mixedM4AURL: URL?
     @State private var transcript: String = ""
     @State private var transcriptModel: Transcript?
+    @State private var transcriptState = TranscriptState()
     @State private var status: String = "Idle"
     @State private var systemGain: Float = 1.0
     @State private var micGain: Float = 1.0
@@ -55,9 +56,15 @@ struct ContentView: View {
     @State private var openAIAPIKey: String = ""
     @AppStorage("openAIChunkingStrategy") private var openAIChunkingStrategy: String = "auto" // "auto" or "none"
     @State private var provider: TranscriptionProvider = .appleCloud
+    @State private var nameSuggestionProvider: NameSuggestionProvider = .openAI
 
     private let recorder = SystemAudioRecorder()
     private let transcriber = FileTranscriber()
+    private let nameSuggestionService = NameSuggestionService()
+
+    @State private var isRequestingNameSuggestions = false
+    @State private var showNameSuggestionSheet = false
+    @State private var suggestedNames: [String: String] = [:]
 
     init() {
         // Initialize provider and key from configuration
@@ -71,6 +78,38 @@ struct ContentView: View {
             _provider = State(initialValue: .appleCloud)
         }
         _openAIAPIKey = State(initialValue: AIConfigManager.shared.openAIKey() ?? "")
+        if let storedSuggestionProvider = NameSuggestionProvider(rawValue: config.nameSuggestionProvider.lowercased()) {
+            _nameSuggestionProvider = State(initialValue: storedSuggestionProvider)
+        } else {
+            _nameSuggestionProvider = State(initialValue: .openAI)
+        }
+    }
+
+    private var speakerLabelsInTranscript: [String] {
+        var ordered: [String] = []
+        var seen: Set<String> = []
+        let lines = transcript.components(separatedBy: CharacterSet.newlines)
+        for rawLine in lines {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            guard let colonIndex = trimmed.firstIndex(of: ":") else { continue }
+            let rawLabel = String(trimmed[..<colonIndex])
+            let label = baseLabel(from: rawLabel)
+            guard !label.isEmpty else { continue }
+            if !seen.contains(label) {
+                seen.insert(label)
+                ordered.append(label)
+            }
+        }
+        return ordered
+    }
+
+    private func baseLabel(from rawLabel: String) -> String {
+        let trimmed = rawLabel.trimmingCharacters(in: .whitespaces)
+        if let parenIndex = trimmed.firstIndex(of: "(") {
+            let base = trimmed[..<parenIndex]
+            return base.trimmingCharacters(in: .whitespaces)
+        }
+        return trimmed
     }
 
     var body: some View {
@@ -84,7 +123,7 @@ struct ContentView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
 
-                if !transcript.isEmpty {
+                if !transcriptState.displayText.isEmpty {
                     Text("Transcript (live):")
                         .font(.headline)
                     ScrollView {
@@ -96,6 +135,31 @@ struct ContentView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                     .frame(minHeight: 120, maxHeight: 240)
+
+                    if !speakerLabelsInTranscript.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Button(action: requestNameSuggestions) {
+                                if isRequestingNameSuggestions {
+                                    ProgressView()
+                                        .progressViewStyle(.circular)
+                                        .frame(maxWidth: .infinity)
+                                } else {
+                                    Text("Suggest Speaker Names")
+                                        .frame(maxWidth: .infinity)
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isRequestingNameSuggestions || nameSuggestionProvider == .disabled)
+
+                            if nameSuggestionProvider == .disabled {
+                                Text("Enable name suggestions from Settings to use this feature.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                    TranscriptView(transcript: $transcriptState)
                 }
             }
 
@@ -124,7 +188,7 @@ struct ContentView: View {
                         stopRecording()
                     } else {
                         // If there is existing audio or transcript, offer to save
-                        if mixedM4AURL != nil || !transcript.isEmpty {
+                        if mixedM4AURL != nil || !transcriptState.isEmpty {
                             showSaveBeforeRecordingPrompt = true
                         } else {
                             startRecording()
@@ -148,7 +212,7 @@ struct ContentView: View {
                 Button("Save Transcript…") {
                     saveTranscript()
                 }
-                .disabled(transcript.isEmpty)
+                .disabled(transcriptState.isEmpty)
             }
 
             // File locations
@@ -173,9 +237,9 @@ struct ContentView: View {
         ) {
             Button("Save Audio…") { saveAudio() }
             Button("Save Transcript…") { saveTranscript() }
-                .disabled(transcript.isEmpty)
+                .disabled(transcriptState.isEmpty)
             Button("Discard", role: .destructive) {
-                transcript = ""
+                transcriptState = TranscriptState()
                 lastTranscriptCount = 0
                 mixedM4AURL = nil
                 status = "Starting new recording..."
@@ -203,6 +267,11 @@ struct ContentView: View {
                 status = "Failed to save default provider: \(error.localizedDescription)"
             }
         }
+        .onChange(of: nameSuggestionProvider) { _, newProvider in
+            do { try AIConfigManager.shared.setNameSuggestionProvider(newProvider.rawValue) } catch {
+                status = "Failed to save name suggestion provider: \(error.localizedDescription)"
+            }
+        }
         .onChange(of: openAIAPIKey) { oldKey, newKey in
             do { try AIConfigManager.shared.updateOpenAIKey(newKey.isEmpty ? nil : newKey) } catch {
                 status = "Failed to save OpenAI key: \(error.localizedDescription)"
@@ -220,6 +289,7 @@ struct ContentView: View {
         .sheet(isPresented: $showSettingsSheet) {
             SettingsSheetView(
                 provider: $provider,
+                nameSuggestionProvider: $nameSuggestionProvider,
                 openAIAPIKey: $openAIAPIKey,
                 openAIChunkingStrategy: $openAIChunkingStrategy,
                 knownSpeakerNamesInputs: $knownSpeakerNamesInputs,
@@ -230,6 +300,75 @@ struct ContentView: View {
             )
             .frame(minWidth: 520, minHeight: 420)
         }
+        .sheet(isPresented: $showNameSuggestionSheet) {
+            NameSuggestionSheet(
+                suggestions: suggestedNames,
+                onApply: {
+                    applyNameSuggestions()
+                    showNameSuggestionSheet = false
+                },
+                onDismiss: { showNameSuggestionSheet = false }
+            )
+        }
+    }
+
+    // MARK: - Name Suggestions
+
+    private func requestNameSuggestions() {
+        guard !isRequestingNameSuggestions else { return }
+        guard nameSuggestionProvider != .disabled else { return }
+
+        let labels = speakerLabelsInTranscript
+        guard !labels.isEmpty else {
+            status = "No speaker labels found in the transcript."
+            return
+        }
+
+        isRequestingNameSuggestions = true
+        status = "Requesting speaker name suggestions..."
+        showNameSuggestionSheet = false
+        suggestedNames = [:]
+
+        Task {
+            do {
+                let suggestions = try await nameSuggestionService.suggestNames(labels: labels, transcript: transcript)
+                await MainActor.run {
+                    self.isRequestingNameSuggestions = false
+                    self.suggestedNames = suggestions
+                    if suggestions.isEmpty {
+                        self.status = "No name suggestions were returned."
+                    } else {
+                        self.status = "Name suggestions ready."
+                        self.showNameSuggestionSheet = true
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.isRequestingNameSuggestions = false
+                    self.status = "Name suggestion failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func applyNameSuggestions() {
+        guard !suggestedNames.isEmpty else { return }
+
+        var lines = transcript.components(separatedBy: CharacterSet.newlines)
+        for index in lines.indices {
+            let line = lines[index]
+            guard let colonIndex = line.firstIndex(of: ":") else { continue }
+            let prefixRange = line.startIndex..<colonIndex
+            let prefix = String(line[prefixRange])
+            let trimmedLabel = baseLabel(from: prefix)
+            guard let replacement = suggestedNames[trimmedLabel], !replacement.isEmpty else { continue }
+            let leadingWhitespace = prefix.prefix { $0 == " " || $0 == "\t" }
+            let remainder = line[colonIndex...]
+            let newPrefix = String(leadingWhitespace) + "\(trimmedLabel) (\(replacement))"
+            lines[index] = newPrefix + remainder
+        }
+        transcript = lines.joined(separator: "\n")
+        status = "Applied name suggestions to transcript."
     }
 
     // MARK: - Actions
@@ -238,6 +377,7 @@ struct ContentView: View {
         status = "Preparing recording..."
         transcript = ""
         transcriptModel = nil
+        transcriptState = TranscriptState()
         mixedM4AURL = nil
 
         let tmp = FileManager.default.temporaryDirectory
@@ -308,6 +448,7 @@ struct ContentView: View {
         isTranscribing = true
         transcript = ""
         transcriptModel = nil
+        transcriptState = TranscriptState()
         lastTranscriptCount = 0
 
         switch provider {
@@ -321,10 +462,10 @@ struct ContentView: View {
                         if partial.count >= lastTranscriptCount {
                             let startIndex = partial.index(partial.startIndex, offsetBy: lastTranscriptCount)
                             let delta = String(partial[startIndex...])
-                            if !delta.isEmpty { transcript += delta }
+                            if !delta.isEmpty { transcriptState.appendToRawText(delta) }
                             lastTranscriptCount = partial.count
                         } else {
-                            transcript = partial
+                            transcriptState.updateRawText(partial)
                             lastTranscriptCount = partial.count
                         }
                     }
@@ -336,7 +477,7 @@ struct ContentView: View {
                             if full.count >= lastTranscriptCount {
                                 let startIndex = full.index(full.startIndex, offsetBy: lastTranscriptCount)
                                 let delta = String(full[startIndex...])
-                                if !delta.isEmpty { transcript += delta }
+                                if !delta.isEmpty { transcriptState.appendToRawText(delta) }
                                 lastTranscriptCount = full.count
                             }
                             transcriptModel = Transcript(
@@ -378,6 +519,9 @@ struct ContentView: View {
                         let rendered = renderer.plainText()
                         transcript = rendered
                         lastTranscriptCount = rendered.count
+                    case .success(let state):
+                        transcriptState = state
+                        lastTranscriptCount = state.displayText.count
                         status = "Transcription complete. (OpenAI)"
                     case .failure(let error):
                         status = "OpenAI failed: \(error.localizedDescription)"
@@ -414,7 +558,9 @@ struct ContentView: View {
 
     private func saveTranscript() {
         guard let model = currentTranscriptModel() else { return }
+        guard !transcriptState.isEmpty else { return }
         #if os(macOS)
+        let stateToSave = transcriptState
         let panel = NSSavePanel()
         var types: [UTType] = [.plainText, .json]
         if let vtt = UTType(filenameExtension: "vtt") {
@@ -425,6 +571,8 @@ struct ContentView: View {
         }
         panel.allowedContentTypes = types
         panel.nameFieldStringValue = "transcript.txt"
+        panel.allowedContentTypes = [UTType.plainText, UTType.json]
+        panel.nameFieldStringValue = stateToSave.hasSpeakerLabels ? "transcript.json" : "transcript.txt"
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.begin { response in
@@ -432,6 +580,19 @@ struct ContentView: View {
                 do {
                     let renderer = TranscriptRenderer(transcript: model)
                     try writeTranscript(using: renderer, to: dest)
+                    if FileManager.default.fileExists(atPath: dest.path) {
+                        try FileManager.default.removeItem(at: dest)
+                    }
+                    let ext = dest.pathExtension.lowercased()
+                    if ext == "json" {
+                        let encoder = JSONEncoder()
+                        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                        let data = try encoder.encode(stateToSave)
+                        try data.write(to: dest)
+                    } else {
+                        let data = stateToSave.plainTextExport.data(using: .utf8) ?? Data()
+                        try data.write(to: dest)
+                    }
                 } catch {
                     DispatchQueue.main.async { status = "Save failed: \(error.localizedDescription)" }
                 }
@@ -471,8 +632,63 @@ struct ContentView: View {
     #endif
 }
 
+private struct NameSuggestionSheet: View {
+    let suggestions: [String: String]
+    let onApply: () -> Void
+    let onDismiss: () -> Void
+
+    private var sortedSuggestions: [(label: String, name: String)] {
+        suggestions.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Suggested Speaker Names").font(.title3).bold()
+                Spacer()
+                Button("Done") { onDismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+
+            if sortedSuggestions.isEmpty {
+                Text("No suggestions available.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(sortedSuggestions, id: \.label) { item in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.label)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(item.name)
+                                .font(.body)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color.gray.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+
+            Spacer()
+
+            if !sortedSuggestions.isEmpty {
+                Button("Apply to Transcript") {
+                    onApply()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .frame(minWidth: 360, minHeight: 320)
+    }
+}
+
 private struct SettingsSheetView: View {
     @Binding var provider: ContentView.TranscriptionProvider
+    @Binding var nameSuggestionProvider: NameSuggestionProvider
     @Binding var openAIAPIKey: String
     @Binding var openAIChunkingStrategy: String
     @Binding var knownSpeakerNamesInputs: [String]
@@ -532,6 +748,19 @@ private struct SettingsSheetView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Name Suggestions").font(.headline)
+                Picker("Name Suggestions Provider", selection: $nameSuggestionProvider) {
+                    ForEach(NameSuggestionProvider.allCases) { option in
+                        Text(option.displayName).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Choose how speaker names are suggested for diarized transcripts.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Divider()
