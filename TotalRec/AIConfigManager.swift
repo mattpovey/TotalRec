@@ -3,11 +3,33 @@ import Security
 
 struct AIConfiguration: Codable {
     var defaultProvider: String
+    var nameSuggestionProvider: String
     var openAIAPIKey: String?
 
-    init(defaultProvider: String = "openai", openAIAPIKey: String? = nil) {
+    init(defaultProvider: String = "openai", nameSuggestionProvider: String = "openai", openAIAPIKey: String? = nil) {
         self.defaultProvider = defaultProvider
+        self.nameSuggestionProvider = nameSuggestionProvider
         self.openAIAPIKey = openAIAPIKey
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case defaultProvider
+        case nameSuggestionProvider
+        case openAIAPIKey
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.defaultProvider = try container.decodeIfPresent(String.self, forKey: .defaultProvider) ?? "openai"
+        self.nameSuggestionProvider = try container.decodeIfPresent(String.self, forKey: .nameSuggestionProvider) ?? "openai"
+        self.openAIAPIKey = try container.decodeIfPresent(String.self, forKey: .openAIAPIKey)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(defaultProvider, forKey: .defaultProvider)
+        try container.encode(nameSuggestionProvider, forKey: .nameSuggestionProvider)
+        try container.encodeIfPresent(openAIAPIKey, forKey: .openAIAPIKey)
     }
 }
 
@@ -31,6 +53,11 @@ final class AIConfigManager {
                 // Non-fatal: log but continue with in-memory defaults
                 print("[AIConfigManager] Failed to save default configuration: \(error)")
             }
+        }
+
+        if configuration.nameSuggestionProvider.isEmpty {
+            configuration.nameSuggestionProvider = "openai"
+            try? save()
         }
         
         // Migrate any previously stored key from JSON to Keychain
@@ -113,6 +140,11 @@ final class AIConfigManager {
 
     func setDefaultProvider(_ provider: String) throws {
         configuration.defaultProvider = provider
+        try save()
+    }
+
+    func setNameSuggestionProvider(_ provider: String) throws {
+        configuration.nameSuggestionProvider = provider
         try save()
     }
 
