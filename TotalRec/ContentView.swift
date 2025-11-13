@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var tempMOVURL: URL?
     @State private var mixedM4AURL: URL?
     @State private var transcript: String = ""
+    @State private var transcriptModel: Transcript?
     @State private var status: String = "Idle"
     @State private var systemGain: Float = 1.0
     @State private var micGain: Float = 1.0
@@ -236,6 +237,7 @@ struct ContentView: View {
     private func startRecording() {
         status = "Preparing recording..."
         transcript = ""
+        transcriptModel = nil
         mixedM4AURL = nil
 
         let tmp = FileManager.default.temporaryDirectory
@@ -305,6 +307,7 @@ struct ContentView: View {
 
         isTranscribing = true
         transcript = ""
+        transcriptModel = nil
         lastTranscriptCount = 0
 
         switch provider {
@@ -336,6 +339,9 @@ struct ContentView: View {
                                 if !delta.isEmpty { transcript += delta }
                                 lastTranscriptCount = full.count
                             }
+                            transcriptModel = Transcript(
+                                segments: [TranscriptSegment(speakerLabel: nil, text: transcript, start: nil, end: nil)]
+                            )
                             status = "Transcription complete. (Apple)"
                         case .failure(let error):
                             status = "Transcription failed: \(error.localizedDescription)"
@@ -366,9 +372,12 @@ struct ContentView: View {
             ) { result in
                 DispatchQueue.main.async {
                     switch result {
-                    case .success(let text):
-                        transcript = text
-                        lastTranscriptCount = text.count
+                    case .success(let model):
+                        transcriptModel = model
+                        let renderer = TranscriptRenderer(transcript: model)
+                        let rendered = renderer.plainText()
+                        transcript = rendered
+                        lastTranscriptCount = rendered.count
                         status = "Transcription complete. (OpenAI)"
                     case .failure(let error):
                         status = "OpenAI failed: \(error.localizedDescription)"
@@ -404,21 +413,25 @@ struct ContentView: View {
     }
 
     private func saveTranscript() {
-        guard !transcript.isEmpty else { return }
+        guard let model = currentTranscriptModel() else { return }
         #if os(macOS)
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType.plainText]
+        var types: [UTType] = [.plainText, .json]
+        if let vtt = UTType(filenameExtension: "vtt") {
+            types.append(vtt)
+        }
+        if let srt = UTType(filenameExtension: "srt") {
+            types.append(srt)
+        }
+        panel.allowedContentTypes = types
         panel.nameFieldStringValue = "transcript.txt"
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.begin { response in
             if response == .OK, let dest = panel.url {
                 do {
-                    let data = transcript.data(using: .utf8) ?? Data()
-                    if FileManager.default.fileExists(atPath: dest.path) {
-                        try FileManager.default.removeItem(at: dest)
-                    }
-                    try data.write(to: dest)
+                    let renderer = TranscriptRenderer(transcript: model)
+                    try writeTranscript(using: renderer, to: dest)
                 } catch {
                     DispatchQueue.main.async { status = "Save failed: \(error.localizedDescription)" }
                 }
@@ -426,6 +439,36 @@ struct ContentView: View {
         }
         #endif
     }
+
+    private func currentTranscriptModel() -> Transcript? {
+        if let model = transcriptModel { return model }
+        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return Transcript(segments: [TranscriptSegment(speakerLabel: nil, text: text, start: nil, end: nil)])
+    }
+
+    #if os(macOS)
+    private func writeTranscript(using renderer: TranscriptRenderer, to url: URL) throws {
+        let ext = url.pathExtension.lowercased()
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        switch ext {
+        case "json":
+            let data = try renderer.json(pretty: true)
+            try data.write(to: url)
+        case "vtt":
+            let text = renderer.captions(format: .webVTT)
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        case "srt":
+            let text = renderer.captions(format: .srt)
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        default:
+            let text = renderer.plainText()
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+    #endif
 }
 
 private struct SettingsSheetView: View {
