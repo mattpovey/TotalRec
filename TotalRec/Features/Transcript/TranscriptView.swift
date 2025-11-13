@@ -1,23 +1,40 @@
 import SwiftUI
 
 struct TranscriptView: View {
+    @Binding var transcript: TranscriptState
     @StateObject private var viewModel: TranscriptViewModel
 
     @State private var isRequestInFlight: Bool = false
     @State private var requestError: TranscriptViewModel.RequestError?
     @State private var showSuggestionSheet: Bool = false
 
-    init(viewModel: TranscriptViewModel) {
-        _viewModel = StateObject(wrappedValue: viewModel)
+    init(transcript: Binding<TranscriptState>, suggestionService: NameSuggestionService = NameSuggestionService()) {
+        _transcript = transcript
+        _viewModel = StateObject(wrappedValue: TranscriptViewModel(transcript: transcript.wrappedValue, suggestionService: suggestionService))
     }
 
     var body: some View {
         ZStack {
-            content
+            VStack(spacing: 16) {
+                formContent
+                transcriptDisplay
+            }
+            .onAppear {
+                viewModel.update(from: transcript)
+                syncAliasesToTranscript()
+            }
+            .onChange(of: transcript) { newValue in
+                viewModel.update(from: newValue)
+            }
+            .onChange(of: viewModel.speakers) { _ in
+                syncAliasesToTranscript()
+            }
+
             if isRequestInFlight {
                 overlay
             }
         }
+        .animation(.easeInOut(duration: 0.1), value: isRequestInFlight)
         .sheet(isPresented: $showSuggestionSheet) {
             suggestionSheet
         }
@@ -31,9 +48,7 @@ struct TranscriptView: View {
             )
         }
         .onReceive(viewModel.$isRequestInFlight) { newValue in
-            withAnimation(.easeInOut(duration: 0.1)) {
-                isRequestInFlight = newValue
-            }
+            isRequestInFlight = newValue
         }
         .onReceive(viewModel.$requestError) { newValue in
             requestError = newValue
@@ -43,44 +58,53 @@ struct TranscriptView: View {
         }
     }
 
-    private var content: some View {
+    private var formContent: some View {
         Form {
             Section(header: Text("Speaker Aliases")) {
-                ForEach($viewModel.speakers) { $speaker in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Speaker \(speaker.label)")
-                                .font(.headline)
-                            Spacer()
-                            TextField("Alias", text: $speaker.alias)
-                                .textFieldStyle(.roundedBorder)
-                                .disabled(isRequestInFlight)
-                                .accessibilityIdentifier("aliasField_\(speaker.label)")
-                        }
+                if viewModel.speakers.isEmpty {
+                    Text("Speaker labels will appear once a diarized transcript is available.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach($viewModel.speakers) { $speaker in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Speaker \(speaker.label)")
+                                    .font(.headline)
+                                Spacer()
+                                TextField("Alias", text: $speaker.alias)
+                                    .textFieldStyle(.roundedBorder)
+                                    .disabled(isRequestInFlight)
+                                    .accessibilityIdentifier("aliasField_\(speaker.label)")
+                            }
 
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Excerpt")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                            TextEditor(text: $speaker.excerpt)
-                                .frame(minHeight: 96)
-                                .disabled(isRequestInFlight)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(Color.secondary.opacity(0.3))
-                                )
-                                .accessibilityIdentifier("excerptEditor_\(speaker.label)")
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Excerpt")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                TextEditor(text: $speaker.excerpt)
+                                    .frame(minHeight: 96)
+                                    .disabled(isRequestInFlight)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(Color.secondary.opacity(0.3))
+                                    )
+                                    .accessibilityIdentifier("excerptEditor_\(speaker.label)")
+                            }
                         }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
-                }
 
-                Button("Reset speaker names") {
-                    viewModel.resetAliases()
+                    Button("Reset speaker names") {
+                        viewModel.resetAliases()
+                    }
+                    .disabled(isRequestInFlight)
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("resetAliasesButton")
                 }
-                .disabled(isRequestInFlight)
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("resetAliasesButton")
             }
 
             Section(header: Text("Name Suggestions")) {
@@ -93,11 +117,35 @@ struct TranscriptView: View {
                     } label: {
                         Label("Request Suggestions", systemImage: "sparkles")
                     }
-                    .disabled(isRequestInFlight)
+                    .disabled(isRequestInFlight || viewModel.speakers.isEmpty)
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("requestSuggestionsButton")
                 }
                 .padding(.vertical, 4)
+            }
+        }
+    }
+
+    private var transcriptDisplay: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Transcript")
+                .font(.headline)
+
+            if transcript.displayText.isEmpty {
+                Text("Transcript will appear here once available.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ScrollView {
+                    Text(transcript.displayText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(8)
+                        .background(Color.gray.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .frame(minHeight: 120, maxHeight: 240)
             }
         }
     }
@@ -185,8 +233,32 @@ struct TranscriptView: View {
         }
         .presentationDetents([.medium, .large])
     }
+
+    private func syncAliasesToTranscript() {
+        var updated = transcript
+        if viewModel.applyAliases(to: &updated) {
+            transcript = updated
+        }
+    }
+}
+
+private struct TranscriptViewPreviewContainer: View {
+    @State private var state: TranscriptState = {
+        let segments = [
+            TranscriptSegment(speakerLabel: "A", text: "Hello, welcome to TotalRec!", start: 0, end: 2.5),
+            TranscriptSegment(speakerLabel: "B", text: "Thanks! It's great to be here.", start: 2.5, end: 4.7),
+            TranscriptSegment(speakerLabel: "A", text: "Let's try out the new speaker alias tools.", start: 4.7, end: 8.1)
+        ]
+        return TranscriptState(segments: segments)
+    }()
+
+    var body: some View {
+        TranscriptView(transcript: $state)
+            .frame(width: 600)
+            .padding()
+    }
 }
 
 #Preview {
-    TranscriptView(viewModel: TranscriptViewModel(numberOfSpeakers: 3))
+    TranscriptViewPreviewContainer()
 }
