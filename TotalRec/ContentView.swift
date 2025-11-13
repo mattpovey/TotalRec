@@ -127,7 +127,7 @@ struct ContentView: View {
                     Text("Transcript (live):")
                         .font(.headline)
                     ScrollView {
-                        Text(transcript)
+                        Text(transcriptState.displayText)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                             .padding(8)
@@ -480,6 +480,7 @@ struct ContentView: View {
                                 if !delta.isEmpty { transcriptState.appendToRawText(delta) }
                                 lastTranscriptCount = full.count
                             }
+                            transcript = full
                             transcriptModel = Transcript(
                                 segments: [TranscriptSegment(speakerLabel: nil, text: transcript, start: nil, end: nil)]
                             )
@@ -513,15 +514,11 @@ struct ContentView: View {
             ) { result in
                 DispatchQueue.main.async {
                     switch result {
-                    case .success(let model):
-                        transcriptModel = model
-                        let renderer = TranscriptRenderer(transcript: model)
-                        let rendered = renderer.plainText()
-                        transcript = rendered
-                        lastTranscriptCount = rendered.count
                     case .success(let state):
                         transcriptState = state
+                        transcript = state.displayText
                         lastTranscriptCount = state.displayText.count
+                        transcriptModel = makeTranscriptModel(from: state)
                         status = "Transcription complete. (OpenAI)"
                     case .failure(let error):
                         status = "OpenAI failed: \(error.localizedDescription)"
@@ -601,8 +598,29 @@ struct ContentView: View {
         #endif
     }
 
+    private func makeTranscriptModel(from state: TranscriptState) -> Transcript? {
+        if !state.segments.isEmpty {
+            let segments = state.segments.map { segment in
+                TranscriptSegment(
+                    speakerLabel: segment.speakerLabel,
+                    text: segment.text,
+                    start: segment.start,
+                    end: segment.end
+                )
+            }
+            return Transcript(segments: segments, aliasMap: state.speakerAliases)
+        }
+
+        let text = state.rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return Transcript(segments: [TranscriptSegment(speakerLabel: nil, text: text, start: nil, end: nil)])
+    }
+
     private func currentTranscriptModel() -> Transcript? {
         if let model = transcriptModel { return model }
+        if let stateModel = makeTranscriptModel(from: transcriptState) {
+            return stateModel
+        }
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         return Transcript(segments: [TranscriptSegment(speakerLabel: nil, text: text, start: nil, end: nil)])
