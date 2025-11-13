@@ -54,12 +54,56 @@ final class TranscriptViewModel: ObservableObject {
         self.suggestionService = suggestionService
     }
 
+    init(transcript: TranscriptState, suggestionService: NameSuggestionService = NameSuggestionService()) {
+        self.suggestionService = suggestionService
+        self.speakers = TranscriptViewModel.makeSpeakerStates(
+            from: transcript,
+            maxExcerptLength: suggestionService.maxExcerptLength
+        )
+    }
+
     convenience init(numberOfSpeakers: Int, suggestionService: NameSuggestionService = NameSuggestionService()) {
         let labels = Self.defaultLabels(count: numberOfSpeakers)
         let states = labels.enumerated().map { index, label in
             SpeakerState(label: label, alias: label, excerpt: "Speaker \(label) sample excerpt #\(index + 1).")
         }
         self.init(speakers: states, suggestionService: suggestionService)
+    }
+
+    func update(from transcript: TranscriptState) {
+        let newStates = TranscriptViewModel.makeSpeakerStates(
+            from: transcript,
+            maxExcerptLength: suggestionService.maxExcerptLength
+        )
+
+        if newStates != speakers {
+            speakers = newStates
+            suggestions = []
+            showSuggestionSheet = false
+            inFlightTask?.cancel()
+            inFlightTask = nil
+            isRequestInFlight = false
+            requestError = nil
+        }
+
+        if newStates.isEmpty {
+            requestError = nil
+        }
+    }
+
+    @discardableResult
+    func applyAliases(to transcript: inout TranscriptState) -> Bool {
+        var updated = false
+
+        for speaker in speakers {
+            let current = transcript.alias(for: speaker.label)
+            if current != speaker.alias {
+                transcript.setAlias(speaker.alias, for: speaker.label)
+                updated = true
+            }
+        }
+
+        return updated
     }
 
     func requestSuggestions() {
@@ -126,6 +170,40 @@ final class TranscriptViewModel: ObservableObject {
 
     func dismissSuggestions() {
         showSuggestionSheet = false
+    }
+
+    private static func makeSpeakerStates(from transcript: TranscriptState, maxExcerptLength: Int) -> [SpeakerState] {
+        let limit = max(maxExcerptLength, 1)
+
+        let groupedSegments = transcript.segments.reduce(into: [String: [TranscriptSegment]]()) { partialResult, segment in
+            guard let label = segment.speakerLabel, !label.isEmpty else { return }
+            partialResult[label, default: []].append(segment)
+        }
+
+        return transcript.orderedSpeakerLabels.map { label in
+            let alias = transcript.alias(for: label)
+            let segments = groupedSegments[label] ?? []
+            let texts = segments.map { $0.text }
+            let excerpt = makeExcerpt(from: texts, fallback: alias, maxLength: limit)
+            return SpeakerState(label: label, alias: alias, excerpt: excerpt)
+        }
+    }
+
+    private static func makeExcerpt(from texts: [String], fallback: String, maxLength: Int) -> String {
+        let joined = texts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !joined.isEmpty else { return fallback }
+
+        if joined.count <= maxLength {
+            return joined
+        }
+
+        let index = joined.index(joined.startIndex, offsetBy: maxLength)
+        var truncated = String(joined[..<index]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if truncated.isEmpty { return fallback }
+        if truncated.count < joined.count {
+            truncated.append("…")
+        }
+        return truncated
     }
 
     private static func defaultLabels(count: Int) -> [String] {
