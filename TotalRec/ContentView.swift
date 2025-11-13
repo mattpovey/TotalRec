@@ -54,9 +54,15 @@ struct ContentView: View {
     @State private var openAIAPIKey: String = ""
     @AppStorage("openAIChunkingStrategy") private var openAIChunkingStrategy: String = "auto" // "auto" or "none"
     @State private var provider: TranscriptionProvider = .appleCloud
+    @State private var nameSuggestionProvider: NameSuggestionProvider = .openAI
 
     private let recorder = SystemAudioRecorder()
     private let transcriber = FileTranscriber()
+    private let nameSuggestionService = NameSuggestionService()
+
+    @State private var isRequestingNameSuggestions = false
+    @State private var showNameSuggestionSheet = false
+    @State private var suggestedNames: [String: String] = [:]
 
     init() {
         // Initialize provider and key from configuration
@@ -70,6 +76,38 @@ struct ContentView: View {
             _provider = State(initialValue: .appleCloud)
         }
         _openAIAPIKey = State(initialValue: AIConfigManager.shared.openAIKey() ?? "")
+        if let storedSuggestionProvider = NameSuggestionProvider(rawValue: config.nameSuggestionProvider.lowercased()) {
+            _nameSuggestionProvider = State(initialValue: storedSuggestionProvider)
+        } else {
+            _nameSuggestionProvider = State(initialValue: .openAI)
+        }
+    }
+
+    private var speakerLabelsInTranscript: [String] {
+        var ordered: [String] = []
+        var seen: Set<String> = []
+        let lines = transcript.components(separatedBy: CharacterSet.newlines)
+        for rawLine in lines {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            guard let colonIndex = trimmed.firstIndex(of: ":") else { continue }
+            let rawLabel = String(trimmed[..<colonIndex])
+            let label = baseLabel(from: rawLabel)
+            guard !label.isEmpty else { continue }
+            if !seen.contains(label) {
+                seen.insert(label)
+                ordered.append(label)
+            }
+        }
+        return ordered
+    }
+
+    private func baseLabel(from rawLabel: String) -> String {
+        let trimmed = rawLabel.trimmingCharacters(in: .whitespaces)
+        if let parenIndex = trimmed.firstIndex(of: "(") {
+            let base = trimmed[..<parenIndex]
+            return base.trimmingCharacters(in: .whitespaces)
+        }
+        return trimmed
     }
 
     var body: some View {
@@ -95,6 +133,30 @@ struct ContentView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                     .frame(minHeight: 120, maxHeight: 240)
+
+                    if !speakerLabelsInTranscript.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Button(action: requestNameSuggestions) {
+                                if isRequestingNameSuggestions {
+                                    ProgressView()
+                                        .progressViewStyle(.circular)
+                                        .frame(maxWidth: .infinity)
+                                } else {
+                                    Text("Suggest Speaker Names")
+                                        .frame(maxWidth: .infinity)
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isRequestingNameSuggestions || nameSuggestionProvider == .disabled)
+
+                            if nameSuggestionProvider == .disabled {
+                                Text("Enable name suggestions from Settings to use this feature.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
                 }
             }
 
@@ -202,6 +264,11 @@ struct ContentView: View {
                 status = "Failed to save default provider: \(error.localizedDescription)"
             }
         }
+        .onChange(of: nameSuggestionProvider) { _, newProvider in
+            do { try AIConfigManager.shared.setNameSuggestionProvider(newProvider.rawValue) } catch {
+                status = "Failed to save name suggestion provider: \(error.localizedDescription)"
+            }
+        }
         .onChange(of: openAIAPIKey) { oldKey, newKey in
             do { try AIConfigManager.shared.updateOpenAIKey(newKey.isEmpty ? nil : newKey) } catch {
                 status = "Failed to save OpenAI key: \(error.localizedDescription)"
@@ -219,6 +286,7 @@ struct ContentView: View {
         .sheet(isPresented: $showSettingsSheet) {
             SettingsSheetView(
                 provider: $provider,
+                nameSuggestionProvider: $nameSuggestionProvider,
                 openAIAPIKey: $openAIAPIKey,
                 openAIChunkingStrategy: $openAIChunkingStrategy,
                 knownSpeakerNamesInputs: $knownSpeakerNamesInputs,
@@ -229,6 +297,75 @@ struct ContentView: View {
             )
             .frame(minWidth: 520, minHeight: 420)
         }
+        .sheet(isPresented: $showNameSuggestionSheet) {
+            NameSuggestionSheet(
+                suggestions: suggestedNames,
+                onApply: {
+                    applyNameSuggestions()
+                    showNameSuggestionSheet = false
+                },
+                onDismiss: { showNameSuggestionSheet = false }
+            )
+        }
+    }
+
+    // MARK: - Name Suggestions
+
+    private func requestNameSuggestions() {
+        guard !isRequestingNameSuggestions else { return }
+        guard nameSuggestionProvider != .disabled else { return }
+
+        let labels = speakerLabelsInTranscript
+        guard !labels.isEmpty else {
+            status = "No speaker labels found in the transcript."
+            return
+        }
+
+        isRequestingNameSuggestions = true
+        status = "Requesting speaker name suggestions..."
+        showNameSuggestionSheet = false
+        suggestedNames = [:]
+
+        Task {
+            do {
+                let suggestions = try await nameSuggestionService.suggestNames(labels: labels, transcript: transcript)
+                await MainActor.run {
+                    self.isRequestingNameSuggestions = false
+                    self.suggestedNames = suggestions
+                    if suggestions.isEmpty {
+                        self.status = "No name suggestions were returned."
+                    } else {
+                        self.status = "Name suggestions ready."
+                        self.showNameSuggestionSheet = true
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.isRequestingNameSuggestions = false
+                    self.status = "Name suggestion failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func applyNameSuggestions() {
+        guard !suggestedNames.isEmpty else { return }
+
+        var lines = transcript.components(separatedBy: CharacterSet.newlines)
+        for index in lines.indices {
+            let line = lines[index]
+            guard let colonIndex = line.firstIndex(of: ":") else { continue }
+            let prefixRange = line.startIndex..<colonIndex
+            let prefix = String(line[prefixRange])
+            let trimmedLabel = baseLabel(from: prefix)
+            guard let replacement = suggestedNames[trimmedLabel], !replacement.isEmpty else { continue }
+            let leadingWhitespace = prefix.prefix { $0 == " " || $0 == "\t" }
+            let remainder = line[colonIndex...]
+            let newPrefix = String(leadingWhitespace) + "\(trimmedLabel) (\(replacement))"
+            lines[index] = newPrefix + remainder
+        }
+        transcript = lines.joined(separator: "\n")
+        status = "Applied name suggestions to transcript."
     }
 
     // MARK: - Actions
@@ -428,8 +565,63 @@ struct ContentView: View {
     }
 }
 
+private struct NameSuggestionSheet: View {
+    let suggestions: [String: String]
+    let onApply: () -> Void
+    let onDismiss: () -> Void
+
+    private var sortedSuggestions: [(label: String, name: String)] {
+        suggestions.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Suggested Speaker Names").font(.title3).bold()
+                Spacer()
+                Button("Done") { onDismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+
+            if sortedSuggestions.isEmpty {
+                Text("No suggestions available.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(sortedSuggestions, id: \.label) { item in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.label)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(item.name)
+                                .font(.body)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color.gray.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+
+            Spacer()
+
+            if !sortedSuggestions.isEmpty {
+                Button("Apply to Transcript") {
+                    onApply()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .frame(minWidth: 360, minHeight: 320)
+    }
+}
+
 private struct SettingsSheetView: View {
     @Binding var provider: ContentView.TranscriptionProvider
+    @Binding var nameSuggestionProvider: NameSuggestionProvider
     @Binding var openAIAPIKey: String
     @Binding var openAIChunkingStrategy: String
     @Binding var knownSpeakerNamesInputs: [String]
@@ -489,6 +681,19 @@ private struct SettingsSheetView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Name Suggestions").font(.headline)
+                Picker("Name Suggestions Provider", selection: $nameSuggestionProvider) {
+                    ForEach(NameSuggestionProvider.allCases) { option in
+                        Text(option.displayName).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Choose how speaker names are suggested for diarized transcripts.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Divider()
