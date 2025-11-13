@@ -168,7 +168,6 @@ struct OpenAITranscriber {
         knownSpeakerReferences: [String]? = nil,
         knownSpeakers: [KnownSpeaker]? = nil,
         onProgress: ((String) -> Void)? = nil,
-        completion: @escaping (Result<Transcript, Error>) -> Void
         completion: @escaping (Result<TranscriptState, Error>) -> Void
     ) {
         // Use provided key if present; otherwise fall back to saved key
@@ -308,7 +307,6 @@ struct OpenAITranscriber {
                 let decoded = try JSONDecoder().decode(Response.self, from: data)
                 let diarizedSegments = decoded.segments ?? decoded.diarization?.segments
                 if let segments = diarizedSegments, !segments.isEmpty {
-                    let convertedSegments = segments.map { seg in
                     let mappedSegments: [TranscriptSegment] = segments.map { seg in
                         TranscriptSegment(
                             speakerLabel: seg.speaker,
@@ -317,20 +315,14 @@ struct OpenAITranscriber {
                             end: seg.end
                         )
                     }
-                    let transcript = Transcript(
-                        segments: convertedSegments,
-                        aliasMap: decoded.speakerMap ?? [:]
+                    let combinedText = decoded.text ?? segments.map { $0.text }.joined(separator: " ")
+                    let state = TranscriptState(
+                        segments: mappedSegments,
+                        rawText: combinedText,
+                        speakerAliases: decoded.speakerMap ?? [:]
                     )
-                    completion(.success(transcript))
-                } else if let text = decoded.text {
-                    let transcript = Transcript(
-                        segments: [TranscriptSegment(speakerLabel: nil, text: text, start: nil, end: nil)],
-                        aliasMap: decoded.speakerMap ?? [:]
-                    )
-                    completion(.success(transcript))
-                    let state = TranscriptState(segments: mappedSegments, rawText: decoded.text ?? "")
                     completion(.success(state))
-                } else if let text = decoded.text {
+                } else if let text = decoded.text, !text.isEmpty {
                     completion(.success(TranscriptState(rawText: text)))
                 } else {
                     self.logError("No text or segments found in response JSON")
@@ -341,11 +333,6 @@ struct OpenAITranscriber {
                 // Try to fallback to raw text body if API returns plain text
                 if let text = String(data: data, encoding: .utf8), !text.isEmpty {
                     self.logError("Falling back to raw text body due to decode failure")
-                    let transcript = Transcript(
-                        segments: [TranscriptSegment(speakerLabel: nil, text: text, start: nil, end: nil)],
-                        aliasMap: [:]
-                    )
-                    completion(.success(transcript))
                     completion(.success(TranscriptState(rawText: text)))
                 } else {
                     self.logError("No decodable JSON and empty body; failing with decode error")
@@ -363,7 +350,6 @@ struct OpenAITranscriber {
         knownSpeakerReferences: [String]? = nil,
         knownSpeakers: [KnownSpeaker]? = nil,
         onProgress: ((String) -> Void)? = nil
-    ) async throws -> Transcript {
     ) async throws -> TranscriptState {
         return try await withCheckedThrowingContinuation { continuation in
             transcribeDiarized(
