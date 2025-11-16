@@ -16,13 +16,13 @@ TotalRec is a macOS app for recording system audio + microphone, transcribing th
 ## Screenshots
 
 - Capture tab
-  - ![Capture Tab](Screenshots/capture.png)
+  - ![Capture Tab](Screenshots/Capture.png)
 - Transcript tab
-  - ![Transcript Tab](Screenshots/transcript.png)
+  - ![Transcript Tab](Screenshots/Transcript.png)
 - Insights tab
-  - ![Insights Tab](Screenshots/insights.png)
+  - ![Insights Tab](Screenshots/Insights.png)
 - Settings sheet
-  - ![Settings](Screenshots/settings.png)
+  - ![Settings](Screenshots/Settings.png)
 
 ## App Workflow
 The app is organized in three tabs:
