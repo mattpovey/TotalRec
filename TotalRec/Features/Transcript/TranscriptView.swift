@@ -124,15 +124,6 @@ struct TranscriptView: View {
                         .padding(.vertical, 4)
                     }
 
-                    HStack {
-                        Button("Reset speaker names") {
-                            viewModel.resetAliases()
-                        }
-                        .disabled(isRequestInFlight)
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("resetAliasesButton")
-                        Spacer()
-                    }
                 }
             }
         }
@@ -157,7 +148,6 @@ struct TranscriptView: View {
                         .background(Color.gray.opacity(0.08))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
-                .frame(minHeight: 120, maxHeight: 240)
             }
         }
     }

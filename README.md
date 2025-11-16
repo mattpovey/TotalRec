@@ -1,8 +1,6 @@
 # TotalRec
 
-TotalRec is a macOS app for recording system audio + microphone, transcribing the result with Apple or OpenAI, and generating structured meeting insights. It streamlines the workflow from capture → transcript → insights, with tools for speaker labeling and export.
-
-> Note: This repository contains SwiftUI code targeting macOS. Some features (file panels, window sizing) are macOS-only.
+TotalRec is a macOS app for recording system audio + microphone, transcribing the result with Apple or OpenAI, and generating structured meeting notes or running an arbitrary LLM prompt against the transcript. It streamlines the workflow from capture → transcript → insights, with tools for speaker labeling and export.
 
 ## Features
 - Record mixed audio (system + microphone) to a single M4A file
@@ -11,21 +9,20 @@ TotalRec is a macOS app for recording system audio + microphone, transcribing th
   - Apple Speech (on-device or cloud)
   - OpenAI diarized transcription (with optional Known Speakers)
 - Review and edit transcripts with speaker tools
-- Request speaker name suggestions (configurable provider)
-- Generate structured meeting notes (with an optional custom prompt)
+- Request speaker name suggestions from a LLM
+- Generate structured meeting notes (or use an optional custom prompt)
 - Export audio, transcripts (.txt, .json, .vtt, .srt), and notes (.txt, .json)
 
 ## Screenshots
-Add screenshots to the repository (e.g., in a `Screenshots/` folder) and update the image links below.
 
 - Capture tab
-  - ![Capture Tab Placeholder](Screenshots/capture.png)
+  - ![Capture Tab](Screenshots/capture.png)
 - Transcript tab
-  - ![Transcript Tab Placeholder](Screenshots/transcript.png)
+  - ![Transcript Tab](Screenshots/transcript.png)
 - Insights tab
-  - ![Insights Tab Placeholder](Screenshots/insights.png)
+  - ![Insights Tab](Screenshots/insights.png)
 - Settings sheet
-  - ![Settings Placeholder](Screenshots/settings.png)
+  - ![Settings](Screenshots/settings.png)
 
 ## App Workflow
 The app is organized in three tabs:
@@ -56,7 +53,7 @@ The app is organized in three tabs:
 2. Select the macOS target and run.
 3. On first record, macOS will request Screen Recording permission. Grant it in:
    - System Settings → Privacy & Security → Screen Recording → enable for this app
-4. (Optional) Configure OpenAI in Settings within the app.
+4. (Optional) Configure OpenAI API key in Settings within the app.
 
 ## Configuration
 ### Transcription Provider
@@ -68,10 +65,10 @@ Choose between:
 The current provider is shown in the header with a status badge. For OpenAI, the badge indicates whether an API key is configured.
 
 ### OpenAI Key & Chunking
-- Enter your OpenAI API key in the app’s Settings sheet. It’s stored securely in Keychain.
+- Enter your OpenAI API key in the app’s Settings sheet. It’s stored in Keychain.
 - Chunking strategy for long audio:
   - `Auto` (default): Splits long audio into multiple uploads
-  - `None`: Uploads the entire file at once
+  - `None`: Uploads the entire file at once but will fail if the audio is longer than permitted by the API
 
 ### Known Speakers (Optional)
 Provide up to 4 known speakers to improve diarization with OpenAI. Each entry requires both:
@@ -79,6 +76,8 @@ Provide up to 4 known speakers to improve diarization with OpenAI. Each entry re
 - Reference (either a `data:audio/...` URL or a remote URL)
 
 If any row is partially filled, transcription with OpenAI will be disabled until the row is completed or cleared.
+
+This is useful if transcribing known speakers repeatedly but in general the Suggest Names functionality works well enough for this purpose if names are mentioned in the transcript (i.e. when people introduce themselves)
 
 ### Name Suggestions Provider
 Controls where speaker name suggestions come from (can be disabled).
@@ -90,7 +89,7 @@ Adjust system and mic gain before mixing down the recorded MOV into M4A.
 ### Capture
 - Start Recording: begins system + mic capture, writing a temporary MOV file that is mixed down to M4A
 - Import Audio…: choose a local audio file or download from a URL
-- Save Audio…: export the mixed M4A
+- Save Audio…: export the mixed (system output and mic) M4A
 - Save Transcript…: choose a format to export the current transcript
 
 ### Transcript
@@ -136,4 +135,24 @@ If recording fails to start, check System Settings → Privacy & Security → Sc
 - Cross-platform considerations where feasible
 
 ## License
-Add your license here (e.g., MIT). Replace this section with the appropriate license text.
+MIT License
+
+Copyright (c) 2025 Matthew Povey
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

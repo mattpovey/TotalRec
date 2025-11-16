@@ -79,6 +79,12 @@ struct TranscriptState: Codable, Equatable {
         ensureAliases()
     }
 
+    mutating func resetAliases() {
+        speakerAliases = [:]
+        ensureAliases()
+    }
+
+
     mutating func updateSegments(_ segments: [TranscriptSegment]) {
         self.segments = segments
         ensureAliases()

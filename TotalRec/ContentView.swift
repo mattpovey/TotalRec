@@ -189,6 +189,16 @@ struct ContentView: View {
         !transcriptState.displayText.isEmpty
     }
 
+    private var hasCustomSpeakerAliases: Bool {
+        for label in transcriptState.orderedSpeakerLabels {
+            let alias = transcriptState.alias(for: label).trimmingCharacters(in: .whitespacesAndNewlines)
+            if alias.caseInsensitiveCompare(label) != .orderedSame {
+                return true
+            }
+        }
+        return false
+    }
+
     private var isTranscriptionActionDisabled: Bool {
         mixedM4AURL == nil ||
         isTranscribing ||
@@ -370,14 +380,6 @@ struct ContentView: View {
                 )
                 .id(transcriptViewID)
 
-            HStack(spacing: 8) {
-                Button("Save Transcript (Text)") { saveTranscript(as: .plainText) }
-                    .buttonStyle(.bordered)
-                    .disabled(transcriptState.isEmpty)
-                Button("Save Transcript (JSON)") { saveTranscript(as: .json) }
-                    .buttonStyle(.bordered)
-                    .disabled(transcriptState.isEmpty)
-            }
         }
         .padding()
         .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
@@ -404,7 +406,22 @@ struct ContentView: View {
                 Button("Consolidate Consecutive Speakers", action: consolidateConsecutiveSpeakers)
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("consolidateSpeakersButton")
+
+                Button("Reset Speaker Names", action: resetSpeakerAliases)
+                    .buttonStyle(.bordered)
+                    .disabled(!hasCustomSpeakerAliases)
+                    .accessibilityIdentifier("resetAliasesButtonToolbar")
             }
+
+            HStack(spacing: 8) {
+                Button("Save Transcript (Text)") { saveTranscript(as: .plainText) }
+                    .buttonStyle(.bordered)
+                    .disabled(transcriptState.isEmpty)
+                Button("Save Transcript (JSON)") { saveTranscript(as: .json) }
+                    .buttonStyle(.bordered)
+                    .disabled(transcriptState.isEmpty)
+            }
+
             if isNameSuggestionRequestInFlight {
                 Text("Contacting \(nameSuggestionProvider.displayName) for name ideas…")
                     .font(.caption)
@@ -617,6 +634,18 @@ struct ContentView: View {
         lastTranscriptCount = transcriptState.displayText.count
         transcriptViewID = UUID()
         status = "Consolidated consecutive speaker turns."
+    }
+
+    private func resetSpeakerAliases() {
+        guard hasCustomSpeakerAliases else {
+            status = "Speaker aliases already reset."
+            return
+        }
+        transcriptState.resetAliases()
+        transcript = transcriptState.displayText
+        lastTranscriptCount = transcriptState.displayText.count
+        transcriptViewID = UUID()
+        status = "Speaker aliases reset."
     }
 
     private func transcribeWithOpenAI(audioURL: URL) async {
