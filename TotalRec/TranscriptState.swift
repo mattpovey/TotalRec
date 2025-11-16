@@ -84,6 +84,88 @@ struct TranscriptState: Codable, Equatable {
         ensureAliases()
     }
 
+    var hasConsecutiveSpeakerRuns: Bool {
+        guard segments.count > 1 else { return false }
+        for index in 1..<segments.count {
+            let prev = segments[index - 1]
+            let current = segments[index]
+            if let prevLabel = prev.speakerLabel,
+               let currentLabel = current.speakerLabel,
+               !prevLabel.isEmpty,
+               prevLabel == currentLabel {
+                return true
+            }
+        }
+        return false
+    }
+
+    @discardableResult
+    mutating func consolidateConsecutiveSpeakers() -> Bool {
+        guard segments.count > 1 else { return false }
+        var merged: [TranscriptSegment] = []
+        var changed = false
+
+        for segment in segments {
+            if var last = merged.last,
+               let lastLabel = last.speakerLabel,
+               let currentLabel = segment.speakerLabel,
+               !lastLabel.isEmpty,
+               lastLabel == currentLabel {
+                changed = true
+                last.text = combineText(last.text, segment.text)
+                if last.start == nil { last.start = segment.start }
+                if let newEnd = segment.end { last.end = newEnd }
+                merged[merged.count - 1] = last
+            } else {
+                merged.append(segment)
+            }
+        }
+
+        guard changed else { return false }
+        segments = merged
+        ensureAliases()
+        rawText = TranscriptFormatter(transcript: self).joinedPlainText()
+        return true
+    }
+
+    mutating func append(_ other: TranscriptState, timeOffset: TimeInterval) {
+        if !other.segments.isEmpty {
+            let adjusted = other.segments.map { segment -> TranscriptSegment in
+                var next = segment
+                if let start = segment.start { next.start = start + timeOffset }
+                if let end = segment.end { next.end = end + timeOffset }
+                return next
+            }
+            segments.append(contentsOf: adjusted)
+        }
+
+        if rawText.isEmpty {
+            rawText = other.rawText
+        } else if !other.rawText.isEmpty {
+            rawText += "\n" + other.rawText
+        }
+
+        for (label, alias) in other.speakerAliases {
+            if speakerAliases[label] == nil {
+                speakerAliases[label] = alias
+            }
+        }
+
+        ensureAliases()
+        if !segments.isEmpty {
+            rawText = TranscriptFormatter(transcript: self).joinedPlainText()
+        }
+    }
+
+    private func combineText(_ existing: String, _ addition: String) -> String {
+        if existing.isEmpty { return addition }
+        if addition.isEmpty { return existing }
+        if existing.hasSuffix(" ") || addition.hasPrefix(" ") {
+            return existing + addition
+        }
+        return existing + " " + addition
+    }
+
     mutating func updateRawText(_ text: String) {
         rawText = text
     }
@@ -110,6 +192,29 @@ struct TranscriptState: Codable, Equatable {
             }.joined(separator: "\n")
         }
         return rawText
+    }
+
+    var attributedDisplayText: AttributedString {
+        if segments.isEmpty {
+            return AttributedString(rawText)
+        }
+
+        var combined = AttributedString()
+        for (index, segment) in segments.enumerated() {
+            if index > 0 {
+                combined.append(AttributedString("\n"))
+            }
+
+            if let label = segment.speakerLabel, !label.isEmpty {
+                var speaker = AttributedString("\(alias(for: label)):")
+                speaker.inlinePresentationIntent = .stronglyEmphasized
+                combined.append(speaker)
+                combined.append(AttributedString(" \(segment.text)"))
+            } else {
+                combined.append(AttributedString(segment.text))
+            }
+        }
+        return combined
     }
 
     var plainTextExport: String {

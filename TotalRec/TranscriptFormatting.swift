@@ -1,46 +1,9 @@
 import Foundation
 
-struct TranscriptSegment: Codable, Hashable {
-    let speakerLabel: String?
-    let text: String
-    let start: TimeInterval?
-    let end: TimeInterval?
-
-    init(speakerLabel: String?, text: String, start: TimeInterval?, end: TimeInterval?) {
-        self.speakerLabel = speakerLabel
-        self.text = text
-        self.start = start
-        self.end = end
-    }
-}
-
-struct Transcript: Codable, Equatable {
-    var segments: [TranscriptSegment]
-    var aliasMap: [String: String]
-
-    init(segments: [TranscriptSegment], aliasMap: [String: String] = [:]) {
-        self.segments = segments
-        self.aliasMap = aliasMap
-    }
-
-    func alias(for rawLabel: String) -> String {
-        let trimmed = rawLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return rawLabel }
-        return aliasMap[trimmed] ?? trimmed
-    }
-
-    func displaySpeaker(for segment: TranscriptSegment) -> String? {
-        guard let label = segment.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else {
-            return nil
-        }
-        return alias(for: label)
-    }
-}
-
 struct TranscriptFormatter {
-    let transcript: Transcript
+    let transcript: TranscriptState
 
-    init(transcript: Transcript) {
+    init(transcript: TranscriptState) {
         self.transcript = transcript
     }
 
@@ -48,22 +11,44 @@ struct TranscriptFormatter {
         transcript.segments.map { segment in
             let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return "" }
-            if let speaker = transcript.displaySpeaker(for: segment) {
+            if let speaker = displaySpeaker(for: segment) {
                 return "\(speaker): \(text)"
             }
             return text
         }.filter { !$0.isEmpty }.joined(separator: "\n")
     }
 
+    /// Joins transcript text while preserving the raw diarization labels (e.g., SPEAKER_00).
+    /// Downstream AI prompts need these IDs to match the `labels` array they receive.
+    func joinedRawSpeakerText() -> String {
+        transcript.segments.map { segment in
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return "" }
+            if let raw = segment.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+                return "\(raw): \(text)"
+            }
+            return text
+        }
+        .filter { !$0.isEmpty }
+        .joined(separator: "\n")
+    }
+
     func captionLines() -> [String] {
         transcript.segments.map { segment in
             let base = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !base.isEmpty else { return "" }
-            if let speaker = transcript.displaySpeaker(for: segment) {
+            if let speaker = displaySpeaker(for: segment) {
                 return "\(speaker): \(base)"
             }
             return base
         }
+    }
+
+    private func displaySpeaker(for segment: TranscriptSegment) -> String? {
+        guard let raw = segment.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        return transcript.alias(for: raw)
     }
 }
 
@@ -73,10 +58,10 @@ enum CaptionFormat {
 }
 
 struct TranscriptRenderer {
-    let transcript: Transcript
+    let transcript: TranscriptState
     private let formatter: TranscriptFormatter
 
-    init(transcript: Transcript) {
+    init(transcript: TranscriptState) {
         self.transcript = transcript
         self.formatter = TranscriptFormatter(transcript: transcript)
     }
@@ -95,13 +80,13 @@ struct TranscriptRenderer {
         }
         struct Payload: Codable {
             let segments: [JSONSegment]
-            let aliasMap: [String: String]
+            let speakerAliases: [String: String]
             let combinedText: String
         }
 
         let segments = transcript.segments.map { segment -> JSONSegment in
             let raw = segment.speakerLabel
-            let alias = raw.flatMap { _ in transcript.displaySpeaker(for: segment) }
+            let alias = raw.flatMap { label in transcript.alias(for: label) }
             return JSONSegment(
                 speaker: alias,
                 rawSpeaker: raw,
@@ -113,7 +98,7 @@ struct TranscriptRenderer {
 
         let payload = Payload(
             segments: segments,
-            aliasMap: transcript.aliasMap,
+            speakerAliases: transcript.speakerAliases,
             combinedText: formatter.joinedPlainText()
         )
         let encoder = JSONEncoder()

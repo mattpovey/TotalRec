@@ -191,7 +191,7 @@ struct OpenAITranscriber {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 120
+        request.timeoutInterval = 600
         request.setValue("Bearer \(effectiveAPIKey)", forHTTPHeaderField: "Authorization")
         // Deleted the line that set Content-Type with a new UUID boundary early to avoid mismatch
 
@@ -282,6 +282,7 @@ struct OpenAITranscriber {
         request.httpBody = body
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
+        print("[OpenAITranscriber] POST \(url.absoluteString) file=\(audioURL.lastPathComponent) size=\(audioData.count) bytes")
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error as NSError? {
                 if error.domain == NSURLErrorDomain && error.code == NSURLErrorCannotFindHost {
@@ -346,6 +347,8 @@ struct OpenAITranscriber {
     func transcribeDiarized(
         audioURL: URL,
         apiKey: String,
+        baseURL: String = "https://api.openai.com",
+        chunkingStrategy: String = "auto",
         knownSpeakerNames: [String]? = nil,
         knownSpeakerReferences: [String]? = nil,
         knownSpeakers: [KnownSpeaker]? = nil,
@@ -355,6 +358,8 @@ struct OpenAITranscriber {
             transcribeDiarized(
                 audioURL: audioURL,
                 apiKey: apiKey,
+                baseURL: baseURL,
+                chunkingStrategy: chunkingStrategy,
                 knownSpeakerNames: knownSpeakerNames,
                 knownSpeakerReferences: knownSpeakerReferences,
                 knownSpeakers: knownSpeakers,
@@ -365,4 +370,3 @@ struct OpenAITranscriber {
         }
     }
 }
-

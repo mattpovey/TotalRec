@@ -76,3 +76,80 @@ struct Mixdown {
     }
 }
 
+struct AudioChunker {
+    struct Chunk {
+        let url: URL
+        let startTime: TimeInterval
+        let isTemporary: Bool
+    }
+
+    static let defaultMaxDuration: TimeInterval = 600 // seconds (10 minutes)
+
+    static func chunkIfNeeded(sourceURL: URL,
+                              strategy: String,
+                              maxDuration: TimeInterval = defaultMaxDuration) async throws -> [Chunk] {
+#if os(macOS)
+        guard strategy.lowercased() == "auto" else {
+            return [Chunk(url: sourceURL, startTime: 0, isTemporary: false)]
+        }
+
+        let asset = AVURLAsset(url: sourceURL)
+        let durationSeconds = try await asset.load(.duration).seconds
+        guard durationSeconds > maxDuration else {
+            return [Chunk(url: sourceURL, startTime: 0, isTemporary: false)]
+        }
+
+        print("[AudioChunker] Splitting \(sourceURL.lastPathComponent) duration=\(String(format: "%.2f", durationSeconds))s into <=\(maxDuration)s chunks")
+
+        var chunks: [Chunk] = []
+        var cursor: TimeInterval = 0
+        while cursor < durationSeconds {
+            let slice = min(maxDuration, durationSeconds - cursor)
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("totalrec-chunk-\(UUID().uuidString)")
+                .appendingPathExtension("m4a")
+            print("[AudioChunker] Exporting chunk start=\(String(format: "%.2f", cursor))s duration=\(String(format: "%.2f", slice))s")
+            try await exportChunk(from: asset, start: cursor, duration: slice, to: tempURL)
+            chunks.append(Chunk(url: tempURL, startTime: cursor, isTemporary: true))
+            cursor += slice
+        }
+        print("[AudioChunker] Created \(chunks.count) chunk(s)")
+        return chunks
+#else
+        return [Chunk(url: sourceURL, startTime: 0, isTemporary: false)]
+#endif
+    }
+
+#if os(macOS)
+    private static func exportChunk(from asset: AVURLAsset,
+                                    start: TimeInterval,
+                                    duration: TimeInterval,
+                                    to destination: URL) async throws {
+        guard let exporter = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+            throw NSError(domain: "AudioChunker", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unable to create exporter"])
+        }
+        exporter.outputURL = destination
+        exporter.outputFileType = .m4a
+        exporter.timeRange = CMTimeRange(
+            start: CMTime(seconds: start, preferredTimescale: 600),
+            duration: CMTime(seconds: duration, preferredTimescale: 600)
+        )
+        exporter.shouldOptimizeForNetworkUse = true
+
+        try await withCheckedThrowingContinuation { continuation in
+            exporter.exportAsynchronously {
+                switch exporter.status {
+                case .completed:
+                    continuation.resume(returning: ())
+                case .failed, .cancelled:
+                    let error = exporter.error ?? NSError(domain: "AudioChunker", code: -2, userInfo: [NSLocalizedDescriptionKey: "Chunk export failed"])
+                    continuation.resume(throwing: error)
+                default:
+                    let error = exporter.error ?? NSError(domain: "AudioChunker", code: -3, userInfo: [NSLocalizedDescriptionKey: "Chunk export ended unexpectedly"])
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+#endif
+}

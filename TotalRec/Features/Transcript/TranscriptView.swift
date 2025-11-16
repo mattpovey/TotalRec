@@ -1,33 +1,47 @@
 import SwiftUI
+import Combine
 
 struct TranscriptView: View {
     @Binding var transcript: TranscriptState
     @StateObject private var viewModel: TranscriptViewModel
+    @Binding private var externalSuggestionTrigger: Int
+    @Binding private var externalRequestInFlight: Bool
 
     @State private var isRequestInFlight: Bool = false
     @State private var requestError: TranscriptViewModel.RequestError?
     @State private var showSuggestionSheet: Bool = false
 
-    init(transcript: Binding<TranscriptState>, suggestionService: NameSuggestionService = NameSuggestionService()) {
+    init(
+        transcript: Binding<TranscriptState>,
+        suggestionService: NameSuggestionService = NameSuggestionService(),
+        externalSuggestionTrigger: Binding<Int> = .constant(0),
+        externalRequestInFlight: Binding<Bool> = .constant(false)
+    ) {
         _transcript = transcript
+        _externalSuggestionTrigger = externalSuggestionTrigger
+        _externalRequestInFlight = externalRequestInFlight
         _viewModel = StateObject(wrappedValue: TranscriptViewModel(transcript: transcript.wrappedValue, suggestionService: suggestionService))
     }
 
     var body: some View {
         ZStack {
             VStack(spacing: 16) {
-                formContent
+                introContent
                 transcriptDisplay
+                formContent
             }
             .onAppear {
                 viewModel.update(from: transcript)
                 syncAliasesToTranscript()
             }
-            .onChange(of: transcript) { newValue in
+            .onChange(of: transcript) { _, newValue in
                 viewModel.update(from: newValue)
             }
-            .onChange(of: viewModel.speakers) { _ in
+            .onChange(of: viewModel.speakers) { _, _ in
                 syncAliasesToTranscript()
+            }
+            .onChange(of: externalSuggestionTrigger) { _, _ in
+                viewModel.requestSuggestions(using: transcript)
             }
 
             if isRequestInFlight {
@@ -49,6 +63,7 @@ struct TranscriptView: View {
         }
         .onReceive(viewModel.$isRequestInFlight) { newValue in
             isRequestInFlight = newValue
+            externalRequestInFlight = newValue
         }
         .onReceive(viewModel.$requestError) { newValue in
             requestError = newValue
@@ -56,6 +71,17 @@ struct TranscriptView: View {
         .onReceive(viewModel.$showSuggestionSheet) { newValue in
             showSuggestionSheet = newValue
         }
+    }
+
+    private var introContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Speaker review & smart suggestions")
+                .font(.headline)
+            Text("Edit speaker aliases manually, review diarized excerpts, or trigger AI-powered name suggestions from the toolbar above.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var formContent: some View {
@@ -98,30 +124,16 @@ struct TranscriptView: View {
                         .padding(.vertical, 4)
                     }
 
-                    Button("Reset speaker names") {
-                        viewModel.resetAliases()
+                    HStack {
+                        Button("Reset speaker names") {
+                            viewModel.resetAliases()
+                        }
+                        .disabled(isRequestInFlight)
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("resetAliasesButton")
+                        Spacer()
                     }
-                    .disabled(isRequestInFlight)
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("resetAliasesButton")
                 }
-            }
-
-            Section(header: Text("Name Suggestions")) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Use an AI-assisted suggestion to label each speaker.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Button {
-                        viewModel.requestSuggestions()
-                    } label: {
-                        Label("Request Suggestions", systemImage: "sparkles")
-                    }
-                    .disabled(isRequestInFlight || viewModel.speakers.isEmpty)
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("requestSuggestionsButton")
-                }
-                .padding(.vertical, 4)
             }
         }
     }
@@ -138,7 +150,7 @@ struct TranscriptView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 ScrollView {
-                    Text(transcript.displayText)
+                    Text(transcript.attributedDisplayText)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
                         .padding(8)
@@ -182,19 +194,33 @@ struct TranscriptView: View {
                             .multilineTextAlignment(.center)
                             .foregroundStyle(.secondary)
                     }
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .padding()
                 } else {
-                    List(viewModel.suggestions) { suggestion in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Speaker \(suggestion.label)")
-                                .font(.headline)
-                            Text(suggestion.name)
-                                .font(.body)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Review and edit suggested speaker names before applying.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        ScrollView {
+                            VStack(spacing: 12) {
+                                ForEach($viewModel.suggestions) { $suggestion in
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text("Speaker \(suggestion.label)")
+                                            .font(.headline)
+                                        TextField("Suggested name", text: $suggestion.name)
+                                            .textFieldStyle(.roundedBorder)
+                                            .accessibilityIdentifier("suggestedNameField_\(suggestion.label)")
+                                    }
+                                    .padding()
+                                    .background(Color.gray.opacity(0.08))
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .padding(.vertical, 4)
                     }
-                    .listStyle(.insetGrouped)
+                    .padding(.horizontal)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
 
                 Divider()
@@ -214,6 +240,8 @@ struct TranscriptView: View {
 
                     Button("Apply") {
                         viewModel.applySuggestions()
+                        // Ensure aliases are written into the bound transcript immediately
+                        syncAliasesToTranscript()
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("applySuggestionsButton")
@@ -222,6 +250,7 @@ struct TranscriptView: View {
                 .padding(.bottom)
             }
             .padding(.top)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .navigationTitle("Suggested Names")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -251,9 +280,15 @@ private struct TranscriptViewPreviewContainer: View {
         ]
         return TranscriptState(segments: segments)
     }()
+    @State private var trigger: Int = 0
+    @State private var inFlight: Bool = false
 
     var body: some View {
-        TranscriptView(transcript: $state)
+        TranscriptView(
+            transcript: $state,
+            externalSuggestionTrigger: $trigger,
+            externalRequestInFlight: $inFlight
+        )
             .frame(width: 600)
             .padding()
     }
