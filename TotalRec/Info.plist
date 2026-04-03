@@ -4,5 +4,10 @@
 <dict>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>This app records system audio.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 </dict>
 </plist>

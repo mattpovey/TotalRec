@@ -5,17 +5,25 @@ struct AIConfiguration: Codable {
     var defaultProvider: String
     var nameSuggestionProvider: String
     var openAIAPIKey: String?
+    var tscript: TScriptConfiguration
 
-    init(defaultProvider: String = "openai", nameSuggestionProvider: String = "openai", openAIAPIKey: String? = nil) {
+    init(
+        defaultProvider: String = "openai",
+        nameSuggestionProvider: String = "openai",
+        openAIAPIKey: String? = nil,
+        tscript: TScriptConfiguration = TScriptConfiguration()
+    ) {
         self.defaultProvider = defaultProvider
         self.nameSuggestionProvider = nameSuggestionProvider
         self.openAIAPIKey = openAIAPIKey
+        self.tscript = tscript
     }
 
     enum CodingKeys: String, CodingKey {
         case defaultProvider
         case nameSuggestionProvider
         case openAIAPIKey
+        case tscript
     }
 
     init(from decoder: Decoder) throws {
@@ -23,6 +31,7 @@ struct AIConfiguration: Codable {
         self.defaultProvider = try container.decodeIfPresent(String.self, forKey: .defaultProvider) ?? "openai"
         self.nameSuggestionProvider = try container.decodeIfPresent(String.self, forKey: .nameSuggestionProvider) ?? "openai"
         self.openAIAPIKey = try container.decodeIfPresent(String.self, forKey: .openAIAPIKey)
+        self.tscript = try container.decodeIfPresent(TScriptConfiguration.self, forKey: .tscript) ?? TScriptConfiguration()
     }
 
     func encode(to encoder: Encoder) throws {
@@ -30,6 +39,7 @@ struct AIConfiguration: Codable {
         try container.encode(defaultProvider, forKey: .defaultProvider)
         try container.encode(nameSuggestionProvider, forKey: .nameSuggestionProvider)
         try container.encodeIfPresent(openAIAPIKey, forKey: .openAIAPIKey)
+        try container.encode(tscript, forKey: .tscript)
     }
 }
 
@@ -145,6 +155,11 @@ final class AIConfigManager {
 
     func setNameSuggestionProvider(_ provider: String) throws {
         configuration.nameSuggestionProvider = provider
+        try save()
+    }
+
+    func updateTScriptConfiguration(_ tscript: TScriptConfiguration) throws {
+        configuration.tscript = tscript
         try save()
     }
 

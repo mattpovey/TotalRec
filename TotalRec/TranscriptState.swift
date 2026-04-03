@@ -57,25 +57,47 @@ struct TranscriptState: Codable, Equatable {
 
     var hasSpeakerLabels: Bool { !orderedSpeakerLabels.isEmpty }
 
+    static func canonicalSpeakerLabel(_ label: String?) -> String? {
+        guard let label else { return nil }
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let simplified = trimmed
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: " ", with: "")
+
+        switch simplified {
+        case "?", "unknown", "speakerunknown", "none", "unspecified":
+            return nil
+        default:
+            return trimmed
+        }
+    }
+
     var orderedSpeakerLabels: [String] {
         var order: [String] = []
         for segment in segments {
-            guard let label = segment.speakerLabel, !label.isEmpty else { continue }
+            guard let label = Self.canonicalSpeakerLabel(segment.speakerLabel) else { continue }
             if !order.contains(label) { order.append(label) }
         }
         for key in speakerAliases.keys.sorted() {
-            if !order.contains(key) { order.append(key) }
+            guard let label = Self.canonicalSpeakerLabel(key) else { continue }
+            if !order.contains(label) { order.append(label) }
         }
         return order
     }
 
     func alias(for label: String) -> String {
-        speakerAliases[label] ?? label
+        let canonical = Self.canonicalSpeakerLabel(label) ?? label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return speakerAliases[canonical] ?? canonical
     }
 
     mutating func setAlias(_ alias: String, for label: String) {
+        guard let canonical = Self.canonicalSpeakerLabel(label) else { return }
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-        speakerAliases[label] = trimmed
+        speakerAliases[canonical] = trimmed
         ensureAliases()
     }
 
@@ -95,9 +117,8 @@ struct TranscriptState: Codable, Equatable {
         for index in 1..<segments.count {
             let prev = segments[index - 1]
             let current = segments[index]
-            if let prevLabel = prev.speakerLabel,
-               let currentLabel = current.speakerLabel,
-               !prevLabel.isEmpty,
+            if let prevLabel = Self.canonicalSpeakerLabel(prev.speakerLabel),
+               let currentLabel = Self.canonicalSpeakerLabel(current.speakerLabel),
                prevLabel == currentLabel {
                 return true
             }
@@ -113,9 +134,8 @@ struct TranscriptState: Codable, Equatable {
 
         for segment in segments {
             if var last = merged.last,
-               let lastLabel = last.speakerLabel,
-               let currentLabel = segment.speakerLabel,
-               !lastLabel.isEmpty,
+               let lastLabel = Self.canonicalSpeakerLabel(last.speakerLabel),
+               let currentLabel = Self.canonicalSpeakerLabel(segment.speakerLabel),
                lastLabel == currentLabel {
                 changed = true
                 last.text = combineText(last.text, segment.text)
@@ -152,8 +172,9 @@ struct TranscriptState: Codable, Equatable {
         }
 
         for (label, alias) in other.speakerAliases {
-            if speakerAliases[label] == nil {
-                speakerAliases[label] = alias
+            guard let canonical = Self.canonicalSpeakerLabel(label) else { continue }
+            if speakerAliases[canonical] == nil {
+                speakerAliases[canonical] = alias
             }
         }
 
@@ -186,10 +207,17 @@ struct TranscriptState: Codable, Equatable {
         rawText = ""
     }
 
+    var hasDisplayText: Bool {
+        if !segments.isEmpty {
+            return segments.contains { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+        return !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var displayText: String {
         if !segments.isEmpty {
             return segments.map { segment in
-                if let label = segment.speakerLabel, !label.isEmpty {
+                if let label = Self.canonicalSpeakerLabel(segment.speakerLabel) {
                     let aliasValue = alias(for: label)
                     return "\(aliasValue): \(segment.text)"
                 } else {
@@ -198,6 +226,67 @@ struct TranscriptState: Codable, Equatable {
             }.joined(separator: "\n")
         }
         return rawText
+    }
+
+    func previewText(maxSegments: Int = 8, maxCharacters: Int = 900) -> String {
+        guard maxSegments > 0, maxCharacters > 0 else { return "" }
+
+        if !segments.isEmpty {
+            var previewLines: [String] = []
+            var characterCount = 0
+            var wasTruncated = false
+
+            for segment in segments.prefix(maxSegments) {
+                let line: String
+                if let label = Self.canonicalSpeakerLabel(segment.speakerLabel) {
+                    line = "\(alias(for: label)): \(segment.text)"
+                } else {
+                    line = segment.text
+                }
+
+                let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedLine.isEmpty else { continue }
+
+                let separatorCost = previewLines.isEmpty ? 0 : 1
+                let available = maxCharacters - characterCount - separatorCost
+                guard available > 0 else {
+                    wasTruncated = true
+                    break
+                }
+
+                if trimmedLine.count > available {
+                    let endIndex = trimmedLine.index(trimmedLine.startIndex, offsetBy: available)
+                    let truncatedLine = String(trimmedLine[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !truncatedLine.isEmpty {
+                        previewLines.append(truncatedLine + "…")
+                    }
+                    wasTruncated = true
+                    break
+                }
+
+                previewLines.append(trimmedLine)
+                characterCount += trimmedLine.count + separatorCost
+            }
+
+            if segments.count > maxSegments {
+                wasTruncated = true
+            }
+
+            let preview = previewLines.joined(separator: "\n")
+            if wasTruncated, !preview.hasSuffix("…") {
+                return preview + "\n…"
+            }
+            return preview
+        }
+
+        let trimmedRawText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRawText.isEmpty else { return "" }
+        if trimmedRawText.count <= maxCharacters {
+            return trimmedRawText
+        }
+
+        let endIndex = trimmedRawText.index(trimmedRawText.startIndex, offsetBy: maxCharacters)
+        return String(trimmedRawText[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
     }
 
     var attributedDisplayText: AttributedString {
@@ -211,7 +300,7 @@ struct TranscriptState: Codable, Equatable {
                 combined.append(AttributedString("\n"))
             }
 
-            if let label = segment.speakerLabel, !label.isEmpty {
+            if let label = Self.canonicalSpeakerLabel(segment.speakerLabel) {
                 var speaker = AttributedString("\(alias(for: label)):")
                 speaker.inlinePresentationIntent = .stronglyEmphasized
                 combined.append(speaker)
@@ -232,7 +321,7 @@ struct TranscriptState: Codable, Equatable {
             }
             lines.append("")
         }
-        if !displayText.isEmpty {
+        if hasDisplayText {
             lines.append(displayText)
         }
         return lines.joined(separator: "\n")
@@ -241,11 +330,12 @@ struct TranscriptState: Codable, Equatable {
     private mutating func ensureAliases() {
         var order: [String] = []
         for segment in segments {
-            guard let label = segment.speakerLabel, !label.isEmpty else { continue }
+            guard let label = Self.canonicalSpeakerLabel(segment.speakerLabel) else { continue }
             if !order.contains(label) { order.append(label) }
         }
         for key in speakerAliases.keys.sorted() {
-            if !order.contains(key) { order.append(key) }
+            guard let label = Self.canonicalSpeakerLabel(key) else { continue }
+            if !order.contains(label) { order.append(label) }
         }
         var newMap: [String: String] = [:]
         for (index, label) in order.enumerated() {

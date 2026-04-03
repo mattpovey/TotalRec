@@ -24,7 +24,7 @@ struct TranscriptFormatter {
         transcript.segments.map { segment in
             let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return "" }
-            if let raw = segment.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            if let raw = TranscriptState.canonicalSpeakerLabel(segment.speakerLabel) {
                 return "\(raw): \(text)"
             }
             return text
@@ -45,7 +45,7 @@ struct TranscriptFormatter {
     }
 
     private func displaySpeaker(for segment: TranscriptSegment) -> String? {
-        guard let raw = segment.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+        guard let raw = TranscriptState.canonicalSpeakerLabel(segment.speakerLabel) else {
             return nil
         }
         return transcript.alias(for: raw)

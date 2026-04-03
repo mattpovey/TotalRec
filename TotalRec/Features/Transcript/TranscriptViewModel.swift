@@ -106,6 +106,36 @@ final class TranscriptViewModel: ObservableObject {
         return updated
     }
 
+    func updateAlias(_ alias: String, for label: String) {
+        guard let index = speakers.firstIndex(where: { $0.label == label }) else {
+            return
+        }
+
+        let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedAlias = trimmed.isEmpty ? label : trimmed
+        guard speakers[index].alias != resolvedAlias else {
+            return
+        }
+
+        var updated = speakers
+        updated[index].alias = resolvedAlias
+        speakers = updated
+    }
+
+    func updateExcerpt(_ excerpt: String, for label: String) {
+        guard let index = speakers.firstIndex(where: { $0.label == label }) else {
+            return
+        }
+
+        guard speakers[index].excerpt != excerpt else {
+            return
+        }
+
+        var updated = speakers
+        updated[index].excerpt = excerpt
+        speakers = updated
+    }
+
     func requestSuggestions() {
         guard !isRequestInFlight else { return }
         inFlightTask?.cancel()
