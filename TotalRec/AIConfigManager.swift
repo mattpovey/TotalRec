@@ -9,7 +9,7 @@ struct AIConfiguration: Codable {
 
     init(
         defaultProvider: String = "openai",
-        nameSuggestionProvider: String = "openai",
+        nameSuggestionProvider: String = NameSuggestionProvider.buildDefault.rawValue,
         openAIAPIKey: String? = nil,
         tscript: TScriptConfiguration = TScriptConfiguration()
     ) {
@@ -29,7 +29,7 @@ struct AIConfiguration: Codable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.defaultProvider = try container.decodeIfPresent(String.self, forKey: .defaultProvider) ?? "openai"
-        self.nameSuggestionProvider = try container.decodeIfPresent(String.self, forKey: .nameSuggestionProvider) ?? "openai"
+        self.nameSuggestionProvider = try container.decodeIfPresent(String.self, forKey: .nameSuggestionProvider) ?? NameSuggestionProvider.buildDefault.rawValue
         self.openAIAPIKey = try container.decodeIfPresent(String.self, forKey: .openAIAPIKey)
         self.tscript = try container.decodeIfPresent(TScriptConfiguration.self, forKey: .tscript) ?? TScriptConfiguration()
     }
@@ -65,8 +65,9 @@ final class AIConfigManager {
             }
         }
 
-        if configuration.nameSuggestionProvider.isEmpty {
-            configuration.nameSuggestionProvider = "openai"
+        let supportedProviders = Set(NameSuggestionProvider.allCases.map(\.rawValue))
+        if configuration.nameSuggestionProvider.isEmpty || !supportedProviders.contains(configuration.nameSuggestionProvider.lowercased()) {
+            configuration.nameSuggestionProvider = NameSuggestionProvider.buildDefault.rawValue
             try? save()
         }
         

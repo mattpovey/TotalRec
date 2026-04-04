@@ -78,6 +78,10 @@ struct NameSuggestionService {
     }
 
     func suggestAliases(for speakers: [SpeakerExcerpt]) async throws -> [Suggestion] {
+        guard BuildFeatures.nameSuggestionsEnabled else {
+            return []
+        }
+
         guard !speakers.isEmpty else {
             throw ServiceError.noSpeakers
         }
@@ -92,7 +96,7 @@ struct NameSuggestionService {
 
         let provider = NameSuggestionProvider(
             rawValue: AIConfigManager.shared.configuration.nameSuggestionProvider.lowercased()
-        ) ?? .openAI
+        ) ?? NameSuggestionProvider.buildDefault
 
         switch provider {
         case .disabled:
@@ -148,11 +152,12 @@ struct NameSuggestionService {
     }
 
     func suggestNames(labels: [String], transcript: String) async throws -> [String: String] {
+        guard BuildFeatures.nameSuggestionsEnabled else { return [:] }
         guard !labels.isEmpty else { return [:] }
 
         let provider = NameSuggestionProvider(
             rawValue: AIConfigManager.shared.configuration.nameSuggestionProvider.lowercased()
-        ) ?? .openAI
+        ) ?? NameSuggestionProvider.buildDefault
         print("[NameSuggestions][Service] suggestNames provider=\(provider.rawValue) labels=\(labels.count) transcriptChars=\(transcript.count)")
 
         switch provider {

@@ -316,7 +316,7 @@ struct TScriptTranscriber {
                 return "json"
             }
         }
-        if configuration.timestamps {
+        if model.supportsTimestamps {
             if formats.contains("json") {
                 return "json"
             }
@@ -368,7 +368,7 @@ struct TScriptTranscriber {
         if model.supportsTranslation, configuration.translate {
             appendField("translate", "true")
         }
-        if model.supportsTimestamps, configuration.timestamps {
+        if model.supportsTimestamps {
             appendField("timestamps", "true")
         }
 

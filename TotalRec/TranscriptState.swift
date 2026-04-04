@@ -17,6 +17,11 @@ struct TranscriptSegment: Identifiable, Codable, Equatable {
 }
 
 struct TranscriptState: Codable, Equatable {
+    struct PlaybackRange: Equatable {
+        let start: TimeInterval
+        let end: TimeInterval
+    }
+
     enum CodingKeys: String, CodingKey {
         case segments
         case speakerAliases
@@ -57,6 +62,10 @@ struct TranscriptState: Codable, Equatable {
 
     var hasSpeakerLabels: Bool { !orderedSpeakerLabels.isEmpty }
 
+    var hasTimedSegments: Bool {
+        segments.contains { $0.start != nil }
+    }
+
     static func canonicalSpeakerLabel(_ label: String?) -> String? {
         guard let label else { return nil }
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -82,10 +91,6 @@ struct TranscriptState: Codable, Equatable {
             guard let label = Self.canonicalSpeakerLabel(segment.speakerLabel) else { continue }
             if !order.contains(label) { order.append(label) }
         }
-        for key in speakerAliases.keys.sorted() {
-            guard let label = Self.canonicalSpeakerLabel(key) else { continue }
-            if !order.contains(label) { order.append(label) }
-        }
         return order
     }
 
@@ -101,6 +106,17 @@ struct TranscriptState: Codable, Equatable {
         ensureAliases()
     }
 
+    func speakerLabel(matchingAlias alias: String, excluding excludedLabel: String? = nil) -> String? {
+        let normalizedAlias = Self.normalizedAliasKey(alias)
+        guard !normalizedAlias.isEmpty else { return nil }
+
+        let excluded = Self.canonicalSpeakerLabel(excludedLabel)
+        return orderedSpeakerLabels.first { label in
+            guard label != excluded else { return false }
+            return Self.normalizedAliasKey(self.alias(for: label)) == normalizedAlias
+        }
+    }
+
     mutating func resetAliases() {
         speakerAliases = [:]
         ensureAliases()
@@ -110,6 +126,72 @@ struct TranscriptState: Codable, Equatable {
     mutating func updateSegments(_ segments: [TranscriptSegment]) {
         self.segments = segments
         ensureAliases()
+    }
+
+    func segment(withID id: UUID) -> TranscriptSegment? {
+        segments.first(where: { $0.id == id })
+    }
+
+    func playbackRange(forSegmentID id: UUID, audioDuration: TimeInterval?) -> PlaybackRange? {
+        guard let index = segments.firstIndex(where: { $0.id == id }) else { return nil }
+        return playbackRange(forSegmentAt: index, audioDuration: audioDuration)
+    }
+
+    func segmentID(at time: TimeInterval, audioDuration: TimeInterval?) -> UUID? {
+        for index in segments.indices {
+            guard let range = playbackRange(forSegmentAt: index, audioDuration: audioDuration) else { continue }
+            if time >= range.start && time < range.end {
+                return segments[index].id
+            }
+        }
+        return nil
+    }
+
+    @discardableResult
+    mutating func updateText(_ text: String, forSegmentID id: UUID) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        guard let index = segments.firstIndex(where: { $0.id == id }) else { return false }
+        guard segments[index].text != trimmed else { return false }
+
+        segments[index].text = trimmed
+        rawText = TranscriptFormatter(transcript: self).joinedPlainText()
+        return true
+    }
+
+    @discardableResult
+    mutating func updateSpeakerLabel(_ speakerLabel: String?, forSegmentID id: UUID) -> Bool {
+        guard let index = segments.firstIndex(where: { $0.id == id }) else { return false }
+
+        let normalized = Self.canonicalSpeakerLabel(speakerLabel)
+        let current = Self.canonicalSpeakerLabel(segments[index].speakerLabel)
+        guard current != normalized else { return false }
+
+        segments[index].speakerLabel = normalized
+        ensureAliases()
+        return true
+    }
+
+    @discardableResult
+    mutating func mergeSpeakerLabel(_ sourceLabel: String, into targetLabel: String) -> Bool {
+        guard let source = Self.canonicalSpeakerLabel(sourceLabel),
+              let target = Self.canonicalSpeakerLabel(targetLabel),
+              source != target else {
+            return false
+        }
+
+        var changed = false
+        for index in segments.indices {
+            guard Self.canonicalSpeakerLabel(segments[index].speakerLabel) == source else { continue }
+            segments[index].speakerLabel = target
+            changed = true
+        }
+
+        guard changed else { return false }
+
+        ensureAliases()
+        rawText = TranscriptFormatter(transcript: self).joinedPlainText()
+        return true
     }
 
     var hasConsecutiveSpeakerRuns: Bool {
@@ -199,6 +281,45 @@ struct TranscriptState: Codable, Equatable {
 
     mutating func appendToRawText(_ text: String) {
         rawText += text
+    }
+
+    func literalMatchCount(for searchText: String) -> Int {
+        guard !searchText.isEmpty else { return 0 }
+
+        if !segments.isEmpty {
+            return segments.reduce(into: 0) { count, segment in
+                count += Self.literalMatchCount(in: segment.text, for: searchText)
+            }
+        }
+
+        return Self.literalMatchCount(in: rawText, for: searchText)
+    }
+
+    @discardableResult
+    mutating func replaceAllLiteralMatches(of searchText: String, with replacement: String) -> Int {
+        guard !searchText.isEmpty else { return 0 }
+
+        var totalReplacements = 0
+
+        if !segments.isEmpty {
+            for index in segments.indices {
+                let replacements = Self.literalMatchCount(in: segments[index].text, for: searchText)
+                guard replacements > 0 else { continue }
+                totalReplacements += replacements
+                segments[index].text = segments[index].text.replacingOccurrences(of: searchText, with: replacement)
+            }
+
+            if totalReplacements > 0 {
+                rawText = TranscriptFormatter(transcript: self).joinedPlainText()
+            }
+            return totalReplacements
+        }
+
+        totalReplacements = Self.literalMatchCount(in: rawText, for: searchText)
+        guard totalReplacements > 0 else { return 0 }
+
+        rawText = rawText.replacingOccurrences(of: searchText, with: replacement)
+        return totalReplacements
     }
 
     mutating func reset() {
@@ -328,15 +449,7 @@ struct TranscriptState: Codable, Equatable {
     }
 
     private mutating func ensureAliases() {
-        var order: [String] = []
-        for segment in segments {
-            guard let label = Self.canonicalSpeakerLabel(segment.speakerLabel) else { continue }
-            if !order.contains(label) { order.append(label) }
-        }
-        for key in speakerAliases.keys.sorted() {
-            guard let label = Self.canonicalSpeakerLabel(key) else { continue }
-            if !order.contains(label) { order.append(label) }
-        }
+        let order = orderedSpeakerLabels
         var newMap: [String: String] = [:]
         for (index, label) in order.enumerated() {
             let trimmed = speakerAliases[label]?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -354,5 +467,46 @@ struct TranscriptState: Codable, Equatable {
             return aliasAlphabet[index]
         }
         return "Speaker \(index + 1)"
+    }
+
+    private static func literalMatchCount(in text: String, for searchText: String) -> Int {
+        guard !text.isEmpty, !searchText.isEmpty else { return 0 }
+
+        var searchStart = text.startIndex
+        var total = 0
+
+        while searchStart < text.endIndex,
+              let range = text.range(of: searchText, range: searchStart..<text.endIndex) {
+            total += 1
+            searchStart = range.upperBound
+        }
+
+        return total
+    }
+
+    private static func normalizedAliasKey(_ alias: String) -> String {
+        alias
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private func playbackRange(forSegmentAt index: Int, audioDuration: TimeInterval?) -> PlaybackRange? {
+        guard segments.indices.contains(index),
+              let start = segments[index].start else {
+            return nil
+        }
+
+        let explicitEnd = segments[index].end.flatMap { $0 > start ? $0 : nil }
+        let nextStart: TimeInterval?
+        if index + 1 < segments.count {
+            nextStart = segments[(index + 1)...].compactMap(\.start).first.flatMap { $0 > start ? $0 : nil }
+        } else {
+            nextStart = nil
+        }
+        let fallbackEnd = min(start + 2.0, max(audioDuration ?? (start + 2.0), start + 0.5))
+        let end = explicitEnd ?? nextStart ?? fallbackEnd
+        guard end > start else { return nil }
+
+        return PlaybackRange(start: start, end: end)
     }
 }

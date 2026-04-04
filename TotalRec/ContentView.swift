@@ -26,6 +26,15 @@ struct ContentView: View {
         var id: String { rawValue }
     }
 
+    enum TranscriptWorkspaceStep: String, CaseIterable, Identifiable {
+        case run = "Run"
+        case transcript = "Transcript"
+        case speakers = "Speakers"
+        case document = "Document"
+
+        var id: String { rawValue }
+    }
+
     enum TranscriptExportFormat: String, CaseIterable, Identifiable {
         case plainText
         case json
@@ -60,6 +69,19 @@ struct ContentView: View {
             }
         }
 
+        var preferredPathExtension: String {
+            switch self {
+            case .plainText:
+                return "txt"
+            case .json:
+                return "json"
+            case .webVTT:
+                return "vtt"
+            case .srt:
+                return "srt"
+            }
+        }
+
         func suggestedFilename(hasSpeakerLabels: Bool) -> String {
             switch self {
             case .plainText:
@@ -77,7 +99,6 @@ struct ContentView: View {
     @EnvironmentObject private var appModel: AppModel
 
     @State private var showStartFreshRecordingPrompt = false
-    @State private var showTranscriptFormatDialog = false
     @State private var showImportOptionsDialog = false
     @State private var showURLImportSheet = false
     @State private var importURLString = ""
@@ -91,18 +112,17 @@ struct ContentView: View {
     @State private var tScriptModelsError: String?
     @AppStorage("openAIChunkingStrategy") private var openAIChunkingStrategy: String = "auto"
     @State private var provider: TranscriptionProvider = .appleCloud
-    @State private var nameSuggestionProvider: NameSuggestionProvider = .openAI
+    @State private var nameSuggestionProvider: NameSuggestionProvider = .buildDefault
     @State private var selectedSection: WorkflowSection = .capture
-    @State private var nameSuggestionRequestSignal = 0
-    @State private var isNameSuggestionRequestInFlight = false
+    @State private var selectedTranscriptStep: TranscriptWorkspaceStep = .run
     @State private var customInsightsPrompt = MeetingNotesService.defaultPrompt
     @State private var selectedInsightsPreset = MeetingNotesService.Preset.meetingNotes
     @State private var useCustomInsightsPrompt = false
-    @State private var transcriptViewID = UUID()
     @State private var isKnownSpeakerHintsExpanded = false
     @State private var isTScriptAdvancedOptionsExpanded = false
     @State private var isSessionDiagnosticsExpanded = false
     @State private var sessionPendingDeletion: RecordingSession?
+    @State private var pendingTranscriptNavigationAfterTranscription = false
 
     private let nameSuggestionService = NameSuggestionService()
 
@@ -111,10 +131,11 @@ struct ContentView: View {
         _provider = State(initialValue: TranscriptionProvider.fromStoredValue(config.defaultProvider))
         _openAIAPIKey = State(initialValue: AIConfigManager.shared.openAIKey() ?? "")
         _tScriptConfiguration = State(initialValue: config.tscript)
-        if let storedSuggestionProvider = NameSuggestionProvider(rawValue: config.nameSuggestionProvider.lowercased()) {
+        if let storedSuggestionProvider = NameSuggestionProvider(rawValue: config.nameSuggestionProvider.lowercased()),
+           NameSuggestionProvider.allCases.contains(storedSuggestionProvider) {
             _nameSuggestionProvider = State(initialValue: storedSuggestionProvider)
         } else {
-            _nameSuggestionProvider = State(initialValue: .openAI)
+            _nameSuggestionProvider = State(initialValue: .buildDefault)
         }
     }
 
@@ -291,22 +312,31 @@ struct ContentView: View {
         )
     }
 
+    private var availableTranscriptSteps: [TranscriptWorkspaceStep] {
+        TranscriptWorkspaceStep.allCases.filter { step in
+            switch step {
+            case .run:
+                return true
+            case .transcript:
+                return appModel.transcriptState.hasDisplayText
+            case .speakers:
+                return appModel.transcriptState.hasSpeakerLabels
+            case .document:
+                return appModel.transcriptState.hasDisplayText
+            }
+        }
+    }
+
+    private var defaultTranscriptStep: TranscriptWorkspaceStep {
+        defaultTranscriptStep(for: appModel.transcriptState)
+    }
+
     private var hasTranscriptDisplayText: Bool {
         appModel.transcriptState.hasDisplayText
     }
 
     private var captureTranscriptPreviewText: String {
         appModel.transcriptState.previewText(maxSegments: 8, maxCharacters: 900)
-    }
-
-    private var hasCustomSpeakerAliases: Bool {
-        for label in appModel.transcriptState.orderedSpeakerLabels {
-            let alias = appModel.transcriptState.alias(for: label).trimmingCharacters(in: .whitespacesAndNewlines)
-            if alias.caseInsensitiveCompare(label) != .orderedSame {
-                return true
-            }
-        }
-        return false
     }
 
     private var isTranscriptionActionDisabled: Bool {
@@ -513,10 +543,12 @@ struct ContentView: View {
             let diarization = effectiveTScriptDiarizationMode == .off
                 ? "Diarization off"
                 : "Diarization: \(effectiveTScriptDiarizationMode.displayName)"
-            let timestamps = tScriptConfiguration.timestamps ? "timestamps on" : "timestamps off"
+            let reviewMode = selectedTScriptModel?.supportsTimestamps == true
+                ? "Timed review available"
+                : "Document review only"
             return ReadinessItem(
                 title: selectedTScriptModel?.supportsTimestamps == true || availableTScriptDiarizationModes.count > 1 ? "Model options" : "Model selection",
-                detail: "\(selectedModelName) selected with \(timestamps). \(diarization).",
+                detail: "\(selectedModelName) selected. \(reviewMode). \(diarization).",
                 systemImage: "slider.horizontal.3",
                 tint: .indigo
             )
@@ -732,10 +764,32 @@ struct ContentView: View {
     private var contentWithChangeHandlers: some View {
         splitWorkspace
             .padding()
-            .onChange(of: appModel.transcriptState.hasDisplayText) { oldValue, newValue in
-                if !oldValue && newValue {
+            .onAppear {
+                normalizeSelectedTranscriptStep(preferred: defaultTranscriptStep)
+            }
+            .onChange(of: appModel.transcriptState) { oldValue, newValue in
+                if pendingTranscriptNavigationAfterTranscription, oldValue != newValue {
+                    pendingTranscriptNavigationAfterTranscription = false
                     selectedSection = .transcript
-                    transcriptViewID = UUID()
+                    normalizeSelectedTranscriptStep(preferred: defaultTranscriptStep(for: newValue))
+                } else {
+                    normalizeSelectedTranscriptStep()
+                }
+            }
+            .onChange(of: appModel.isTranscribing) { oldValue, newValue in
+                if newValue {
+                    normalizeSelectedTranscriptStep(preferred: .run)
+                } else if oldValue {
+                    pendingTranscriptNavigationAfterTranscription = false
+                }
+            }
+            .onChange(of: appModel.activeSession?.id) { _, _ in
+                pendingTranscriptNavigationAfterTranscription = false
+                normalizeSelectedTranscriptStep(preferred: defaultTranscriptStep)
+            }
+            .onChange(of: selectedSection) { _, newSection in
+                if newSection == .transcript {
+                    normalizeSelectedTranscriptStep()
                 }
             }
             .onChange(of: appModel.meetingNotes) { oldValue, newValue in
@@ -754,7 +808,7 @@ struct ContentView: View {
             titleVisibility: .visible
         ) {
             Button("Save Audio…") { saveAudio() }
-            Button("Save Transcript…") { showTranscriptFormatDialog = true }
+            Button("Save Transcript…", action: saveTranscript)
                 .disabled(appModel.transcriptState.isEmpty)
             Button("Start Fresh Recording", role: .destructive) {
                 appModel.startRecording()
@@ -762,19 +816,6 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Your existing session remains on disk, but the main window will switch to a new recording session.")
-        }
-        .confirmationDialog(
-            "Save Transcript As…",
-            isPresented: $showTranscriptFormatDialog,
-            titleVisibility: .visible
-        ) {
-            ForEach(TranscriptExportFormat.allCases) { format in
-                Button(format.displayName) {
-                    showTranscriptFormatDialog = false
-                    saveTranscript(as: format)
-                }
-            }
-            Button("Cancel", role: .cancel) {}
         }
         .confirmationDialog(
             "Import Audio",
@@ -872,9 +913,6 @@ struct ContentView: View {
             .onChange(of: tScriptConfiguration.selectedModelID) { _, _ in
                 guard let model = selectedTScriptModel else { return }
                 normalizeTScriptDiarizationSelection(for: model)
-                if !model.supportsTimestamps {
-                    tScriptConfiguration.timestamps = false
-                }
                 if !model.supportsTranslation {
                     tScriptConfiguration.translate = false
                 }
@@ -936,11 +974,11 @@ struct ContentView: View {
     private var mainContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             headerContent
-            sectionNavigation
+            workspaceNavigation
             currentSectionContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(maxWidth: 980, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(.vertical, 4)
     }
 
@@ -1073,10 +1111,33 @@ struct ContentView: View {
         }
     }
 
+    private var workspaceNavigation: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionNavigation
+
+            if selectedSection == .transcript, availableTranscriptSteps.count > 1 {
+                transcriptStepNavigation
+            }
+        }
+    }
+
     private var sectionNavigation: some View {
         ViewThatFits(in: .horizontal) {
             compactSectionNavigation(vertical: false)
             compactSectionNavigation(vertical: true)
+        }
+        .padding(4)
+        .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.gray.opacity(0.10), lineWidth: 1)
+        )
+    }
+
+    private var transcriptStepNavigation: some View {
+        ViewThatFits(in: .horizontal) {
+            compactTranscriptStepNavigation(vertical: false)
+            compactTranscriptStepNavigation(vertical: true)
         }
         .padding(4)
         .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -1098,6 +1159,18 @@ struct ContentView: View {
         }
     }
 
+    private func compactTranscriptStepNavigation(vertical: Bool) -> some View {
+        let layout = vertical
+            ? AnyLayout(VStackLayout(spacing: 8))
+            : AnyLayout(HStackLayout(spacing: 8))
+
+        return layout {
+            ForEach(availableTranscriptSteps) { step in
+                transcriptStepNavigationButton(for: step)
+            }
+        }
+    }
+
     private func sectionNavigationButton(for section: WorkflowSection) -> some View {
         let isSelected = selectedSection == section
         let tint = workflowSectionTint(section)
@@ -1111,6 +1184,38 @@ struct ContentView: View {
                 Image(systemName: workflowSectionIcon(section))
                     .imageScale(.medium)
                 Text(section.rawValue)
+                    .font(.subheadline.weight(.semibold))
+            }
+            .foregroundStyle(isSelected ? tint : .primary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(backgroundColor)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(borderColor, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func transcriptStepNavigationButton(for step: TranscriptWorkspaceStep) -> some View {
+        let isSelected = selectedTranscriptStep == step
+        let tint = workflowSectionTint(.transcript)
+        let backgroundColor = isSelected ? tint.opacity(0.14) : Color.clear
+        let borderColor = isSelected ? tint.opacity(0.35) : Color.gray.opacity(0.10)
+
+        return Button {
+            selectedTranscriptStep = step
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: transcriptStepIcon(step))
+                    .imageScale(.medium)
+                Text(step.rawValue)
                     .font(.subheadline.weight(.semibold))
             }
             .foregroundStyle(isSelected ? tint : .primary)
@@ -1153,12 +1258,25 @@ struct ContentView: View {
         }
     }
 
+    private func transcriptStepIcon(_ step: TranscriptWorkspaceStep) -> String {
+        switch step {
+        case .run:
+            return "slider.horizontal.3"
+        case .transcript:
+            return "text.cursor"
+        case .speakers:
+            return "person.2"
+        case .document:
+            return "doc.text"
+        }
+    }
+
     private func workflowSectionDescription(_ section: WorkflowSection) -> String {
         switch section {
         case .capture:
             return "Record system audio or import a file into a recoverable session."
         case .transcript:
-            return "Run transcription, review diarization, and tune speaker names."
+            return "Run transcription, correct wording, and clean speaker assignments."
         case .insights:
             return "Generate notes and structured summaries from the session transcript."
         }
@@ -1548,7 +1666,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Label("Capture or import audio into a dedicated session.", systemImage: "1.circle.fill")
                         Label("Run transcription when the audio is ready.", systemImage: "2.circle.fill")
-                        Label("Review speakers, then generate notes and insights.", systemImage: "3.circle.fill")
+                        Label("Correct transcript text, then clean speakers and generate notes.", systemImage: "3.circle.fill")
                     }
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -1575,9 +1693,7 @@ struct ContentView: View {
             Button("Save Audio…", action: saveAudio)
                 .disabled(appModel.audioURL == nil)
 
-            Button("Save Transcript…") {
-                showTranscriptFormatDialog = true
-            }
+            Button("Save Transcript…", action: saveTranscript)
             .disabled(appModel.transcriptState.isEmpty)
 
             Button("Go to Transcript") {
@@ -1590,91 +1706,165 @@ struct ContentView: View {
     private var transcriptSection: some View {
         sectionScrollContainer {
             transcriptSectionOverview
-
-            if hasTranscriptDisplayText {
-                pageCard {
-                    TranscriptView(
-                        transcript: transcriptBinding,
-                        suggestionService: nameSuggestionService,
-                        externalSuggestionTrigger: $nameSuggestionRequestSignal,
-                        externalRequestInFlight: $isNameSuggestionRequestInFlight
-                    )
-                    .id(transcriptViewID)
-                }
-            } else {
-                transcriptUnavailableCard
-            }
+            transcriptStepContent
         }
     }
 
     private var transcriptSectionOverview: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            workspaceHero(
-                title: hasTranscriptDisplayText ? "Transcript review and speaker tools" : "Transcript workspace",
-                description: hasTranscriptDisplayText
-                    ? "Review diarized text, request speaker suggestions, and export clean transcripts."
-                    : "Run transcription when your session audio is ready, then refine names and speaker groupings.",
-                systemImage: "text.quote",
-                tint: workflowSectionTint(.transcript),
-                detail: hasTranscriptDisplayText
-                    ? "\(appModel.transcriptState.orderedSpeakerLabels.count) speakers"
-                    : (appModel.audioURL == nil ? nil : "Audio ready\(formattedDurationSuffix)")
-            )
+        workspaceHero(
+            title: "Transcript workspace",
+            description: transcriptStepDescription(for: selectedTranscriptStep),
+            systemImage: "text.quote",
+            tint: workflowSectionTint(.transcript),
+            detail: hasTranscriptDisplayText
+                ? "\(appModel.transcriptState.orderedSpeakerLabels.count) speakers"
+                : (appModel.audioURL == nil ? nil : "Audio ready\(formattedDurationSuffix)")
+        )
+    }
 
+    @ViewBuilder
+    private var transcriptStepContent: some View {
+        switch selectedTranscriptStep {
+        case .run:
+            transcriptRunStepContent
+        case .transcript:
+            transcriptTranscriptStepContent
+        case .speakers:
+            transcriptSpeakersStepContent
+        case .document:
+            transcriptDocumentStepContent
+        }
+    }
+
+    private var transcriptRunStepContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
             transcriptionSetupCard
             readinessCard(
                 title: "Transcription readiness",
                 subtitle: "Verify provider requirements, audio availability, and hint quality before you run or re-run transcription.",
                 items: transcriptionReadinessItems
             )
+            transcriptRunActionCard
             sessionDiagnosticsCard
+        }
+    }
 
-            if hasTranscriptDisplayText {
-                pageCard {
-                    Text("Transcript Actions")
-                        .font(.headline)
-                    transcriptManagementToolbar
+    private var transcriptRunActionCard: some View {
+        pageCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(hasTranscriptDisplayText ? "Re-run transcription" : "Run transcription")
+                    .font(.headline)
+
+                Text(
+                    appModel.audioURL == nil
+                        ? "Record or import audio from the Capture page, then run transcription."
+                        : "This step owns provider selection and execution. Successful runs open Transcript for wording cleanup before speaker review and export."
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    Button(appModel.isTranscribing ? "Transcribing…" : (hasTranscriptDisplayText ? "Re-run Transcription" : "Transcribe Audio")) {
+                        transcribe()
+                    }
+                    .disabled(isTranscriptionActionDisabled)
+                    .buttonStyle(.borderedProminent)
+
+                    Button("Go to Capture") {
+                        selectedSection = .capture
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                if hasTranscriptDisplayText {
+                    statusBanner(
+                        "A new transcription run replaces the current transcript result for this session.",
+                        systemImage: "arrow.clockwise.circle",
+                        tint: .blue
+                    )
+                }
+
+                if !appModel.processingPreviewText.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Live Preview")
+                            .font(.headline)
+                        Text(appModel.processingPreviewText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .background(Color.gray.opacity(0.07))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
                 }
             }
         }
     }
 
-    private var transcriptUnavailableCard: some View {
+    private var transcriptTranscriptStepContent: some View {
         pageCard {
-            Text("Transcript not available yet")
-                .font(.headline)
-
-            Text(appModel.audioURL == nil
-                 ? "Record or import audio from the Capture page, then run transcription."
-                 : "Your session audio is ready\(formattedDurationSuffix). Run transcription when you are ready.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 8) {
-                Button("Transcribe Audio") {
-                    transcribe()
-                }
-                .disabled(isTranscriptionActionDisabled)
-                .buttonStyle(.borderedProminent)
-
-                Button("Go to Capture") {
-                    selectedSection = .capture
-                }
-                .buttonStyle(.bordered)
-            }
-
-            if !appModel.processingPreviewText.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Live Preview")
-                        .font(.headline)
-                    Text(appModel.processingPreviewText)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                        .background(Color.gray.opacity(0.07))
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
+            if appModel.transcriptState.hasDisplayText {
+                TranscriptEditorView(
+                    transcript: transcriptBinding,
+                    audioURL: appModel.audioURL,
+                    audioDuration: appModel.mixedAudioDuration
+                )
+            } else {
+                transcriptStepUnavailableView(
+                    title: "Transcript editing unavailable",
+                    message: "Run transcription first to populate transcript text before editing wording or applying replacements."
+                )
             }
         }
+    }
+
+    private var transcriptSpeakersStepContent: some View {
+        pageCard {
+            if appModel.transcriptState.hasSpeakerLabels {
+                TranscriptSpeakersView(
+                    transcript: transcriptBinding,
+                    audioURL: appModel.audioURL,
+                    audioDuration: appModel.mixedAudioDuration,
+                    suggestionService: nameSuggestionService,
+                    areSuggestionsEnabled: BuildFeatures.nameSuggestionsEnabled && nameSuggestionProvider != .disabled,
+                    suggestionProviderName: nameSuggestionProvider.displayName,
+                    onStatusMessage: { message in
+                        appModel.setStatusMessage(message)
+                    }
+                )
+            } else {
+                transcriptStepUnavailableView(
+                    title: "Speaker tools unavailable",
+                    message: "This transcript does not include speaker labels. Run a diarized provider to enable speaker cleanup."
+                )
+            }
+        }
+    }
+
+    private var transcriptDocumentStepContent: some View {
+        pageCard {
+            if appModel.transcriptState.hasDisplayText {
+                TranscriptDocumentView(
+                    transcript: appModel.transcriptState,
+                    onCopyMarkdown: copyTranscriptAsMarkdown,
+                    onSaveTranscript: saveTranscript
+                )
+            } else {
+                transcriptStepUnavailableView(
+                    title: "Transcript document unavailable",
+                    message: "Run transcription first to populate the transcript document and export tools."
+                )
+            }
+        }
+    }
+
+    private func transcriptStepUnavailableView(title: String, message: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var transcriptionSetupCard: some View {
@@ -2038,12 +2228,14 @@ struct ContentView: View {
             }
 
             if model.supportsTranslation || model.supportsTimestamps {
-                HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
                     if model.supportsTranslation {
                         Toggle("Translate", isOn: $tScriptConfiguration.translate)
                     }
                     if model.supportsTimestamps {
-                        Toggle("Timestamps", isOn: $tScriptConfiguration.timestamps)
+                        Text("Timestamps are requested automatically for models that support timed output so playback stays available in Transcript and Speakers.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -2159,72 +2351,32 @@ struct ContentView: View {
         }
     }
 
-    private var transcriptManagementToolbar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    transcriptPrimaryActions
-                }
+    private func defaultTranscriptStep(for transcript: TranscriptState) -> TranscriptWorkspaceStep {
+        if transcript.hasDisplayText {
+            return .transcript
+        }
+        return .run
+    }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    transcriptPrimaryActions
-                }
-            }
-
-            HStack(spacing: 8) {
-                Button("Save Transcript (Text)") {
-                    saveTranscript(as: .plainText)
-                }
-                .buttonStyle(.bordered)
-                .disabled(appModel.transcriptState.isEmpty)
-
-                Button("Save Transcript (JSON)") {
-                    saveTranscript(as: .json)
-                }
-                .buttonStyle(.bordered)
-                .disabled(appModel.transcriptState.isEmpty)
-            }
-
-            if isNameSuggestionRequestInFlight {
-                Text("Contacting \(nameSuggestionProvider.displayName) for name ideas…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+    private func normalizeSelectedTranscriptStep(preferred: TranscriptWorkspaceStep? = nil) {
+        let candidate = preferred ?? selectedTranscriptStep
+        if availableTranscriptSteps.contains(candidate) {
+            selectedTranscriptStep = candidate
+        } else {
+            selectedTranscriptStep = defaultTranscriptStep
         }
     }
 
-    private var transcriptPrimaryActions: some View {
-        Group {
-            Button(appModel.isTranscribing ? "Transcribing..." : "Re-run Transcription") {
-                transcribe()
-            }
-            .disabled(isTranscriptionActionDisabled)
-            .buttonStyle(.bordered)
-
-            Button(isNameSuggestionRequestInFlight ? "Requesting…" : "Request Suggestions") {
-                appModel.setStatusMessage("Requesting speaker name suggestions...")
-                nameSuggestionRequestSignal &+= 1
-            }
-            .disabled(isNameSuggestionRequestInFlight || !hasTranscriptDisplayText || nameSuggestionProvider == .disabled)
-            .buttonStyle(.bordered)
-            .accessibilityIdentifier("requestSuggestionsToolbarButton")
-
-            Button("Consolidate Consecutive Speakers") {
-                if appModel.consolidateConsecutiveSpeakers() {
-                    transcriptViewID = UUID()
-                }
-            }
-            .buttonStyle(.bordered)
-            .accessibilityIdentifier("consolidateSpeakersButton")
-
-            Button("Reset Speaker Names") {
-                if appModel.resetSpeakerAliases() {
-                    transcriptViewID = UUID()
-                }
-            }
-            .buttonStyle(.bordered)
-            .disabled(!hasCustomSpeakerAliases)
-            .accessibilityIdentifier("resetAliasesButtonToolbar")
+    private func transcriptStepDescription(for step: TranscriptWorkspaceStep) -> String {
+        switch step {
+        case .run:
+            return "Configure the provider, model, and per-run options before you transcribe or re-run this session."
+        case .transcript:
+            return "Correct wording, apply literal replacements, and play timed clips when they are available."
+        case .speakers:
+            return "Focus on aliases, filtered speaker playback, reassignment, and explicit consolidation."
+        case .document:
+            return "Read the final transcript as a document and export the current state once cleanup is complete."
         }
     }
 
@@ -2411,6 +2563,9 @@ struct ContentView: View {
             return
         }
 
+        pendingTranscriptNavigationAfterTranscription = true
+        normalizeSelectedTranscriptStep(preferred: .run)
+
         Task {
             await appModel.transcribe(
                 TranscriptionRunConfiguration(
@@ -2421,12 +2576,25 @@ struct ContentView: View {
                     tscript: provider == .tscript
                         ? TScriptTranscriptionRunConfiguration(
                             baseURL: tScriptConfiguration.baseURL.trimmingCharacters(in: .whitespacesAndNewlines),
-                            configuration: tScriptConfiguration
+                            configuration: effectiveTScriptConfigurationForRun()
                         )
                         : nil
                 )
             )
         }
+    }
+
+    private func effectiveTScriptConfigurationForRun() -> TScriptConfiguration {
+        guard let model = selectedTScriptModel else {
+            return tScriptConfiguration
+        }
+
+        var configuration = tScriptConfiguration
+        configuration.diarizationMode = model.normalizedDiarizationMode(configuration.diarizationMode)
+        if !model.supportsTranslation {
+            configuration.translate = false
+        }
+        return configuration
     }
 
     private func refreshTScriptModels() {
@@ -2472,9 +2640,6 @@ struct ContentView: View {
 
         guard let model = selectedTScriptModel else { return }
         normalizeTScriptDiarizationSelection(for: model)
-        if !model.supportsTimestamps {
-            tScriptConfiguration.timestamps = false
-        }
         if !model.supportsTranslation {
             tScriptConfiguration.translate = false
         }
@@ -2510,40 +2675,74 @@ struct ContentView: View {
 #endif
     }
 
-    private func saveTranscript(as format: TranscriptExportFormat) {
+    private func saveTranscript() {
         guard !appModel.transcriptState.isEmpty else { return }
 #if os(macOS)
         let stateToSave = appModel.transcriptState
+        let availableFormats = transcriptExportFormats(for: stateToSave)
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [format.contentType]
-        panel.nameFieldStringValue = format.suggestedFilename(hasSpeakerLabels: stateToSave.hasSpeakerLabels)
+        let coordinator = TranscriptSavePanelCoordinator(
+            panel: panel,
+            formats: availableFormats,
+            hasSpeakerLabels: stateToSave.hasSpeakerLabels
+        )
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
+        panel.title = "Save Transcript"
+        panel.prompt = "Save"
+        panel.showsTagField = false
+        panel.allowedContentTypes = availableFormats.map(\.contentType)
+        panel.delegate = coordinator
+        if #available(macOS 15.0, *) {
+            panel.showsContentTypes = availableFormats.count > 1
+            panel.currentContentType = availableFormats[0].contentType
+        }
+        panel.nameFieldStringValue = availableFormats[0].suggestedFilename(hasSpeakerLabels: stateToSave.hasSpeakerLabels)
         panel.begin { response in
             if response == .OK, let destination = panel.url {
                 do {
-                    switch format {
-                    case .json:
-                        let encoder = JSONEncoder()
-                        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                        let data = try encoder.encode(stateToSave)
-                        try data.write(to: destination)
-                    case .plainText:
-                        let data = stateToSave.plainTextExport.data(using: .utf8) ?? Data()
-                        try data.write(to: destination)
-                    case .webVTT:
-                        let renderer = TranscriptRenderer(transcript: stateToSave)
-                        try renderer.captions(format: .webVTT).write(to: destination, atomically: true, encoding: .utf8)
-                    case .srt:
-                        let renderer = TranscriptRenderer(transcript: stateToSave)
-                        try renderer.captions(format: .srt).write(to: destination, atomically: true, encoding: .utf8)
-                    }
+                    try writeTranscript(stateToSave, to: destination, format: coordinator.selectedFormat)
                 } catch {
                     appModel.setStatusMessage("Save failed: \(error.localizedDescription)")
                 }
             }
         }
 #endif
+    }
+
+    private func copyTranscriptAsMarkdown() {
+        guard appModel.transcriptState.hasDisplayText else { return }
+#if os(macOS)
+        let markdown = TranscriptRenderer(transcript: appModel.transcriptState).markdown()
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(markdown, forType: .string)
+        appModel.setStatusMessage("Transcript copied as Markdown.")
+#endif
+    }
+
+    private func transcriptExportFormats(for transcript: TranscriptState) -> [TranscriptExportFormat] {
+        var formats: [TranscriptExportFormat] = [.plainText, .json]
+        if transcript.hasTimedSegments {
+            formats.append(contentsOf: [.webVTT, .srt])
+        }
+        return formats
+    }
+
+    private func writeTranscript(_ transcript: TranscriptState, to destination: URL, format: TranscriptExportFormat) throws {
+        let renderer = TranscriptRenderer(transcript: transcript)
+        switch format {
+        case .json:
+            let data = try renderer.json()
+            try data.write(to: destination)
+        case .plainText:
+            let data = transcript.plainTextExport.data(using: .utf8) ?? Data()
+            try data.write(to: destination)
+        case .webVTT:
+            try renderer.captions(format: .webVTT).write(to: destination, atomically: true, encoding: .utf8)
+        case .srt:
+            try renderer.captions(format: .srt).write(to: destination, atomically: true, encoding: .utf8)
+        }
     }
 
     private enum MeetingNotesExportFormat {
@@ -2998,7 +3197,9 @@ private struct SettingsSheetView: View {
                 settingsHeader
                 apiKeySection
                 tScriptServerSection
-                nameSuggestionsSection
+                if BuildFeatures.nameSuggestionsEnabled {
+                    nameSuggestionsSection
+                }
                 workflowSection
             }
             .frame(maxWidth: Self.contentColumnWidth, alignment: .topLeading)
@@ -3333,6 +3534,66 @@ private struct WindowConfigurator: NSViewRepresentable {
                 configure(window)
             }
         }
+    }
+}
+
+private final class TranscriptSavePanelCoordinator: NSObject, NSOpenSavePanelDelegate {
+    private let panel: NSSavePanel
+    private let formats: [ContentView.TranscriptExportFormat]
+    private let hasSpeakerLabels: Bool
+
+    private(set) var selectedFormat: ContentView.TranscriptExportFormat
+
+    init(
+        panel: NSSavePanel,
+        formats: [ContentView.TranscriptExportFormat],
+        hasSpeakerLabels: Bool
+    ) {
+        precondition(!formats.isEmpty, "Transcript save panel requires at least one export format.")
+
+        self.panel = panel
+        self.formats = formats
+        self.hasSpeakerLabels = hasSpeakerLabels
+        self.selectedFormat = formats[0]
+
+        super.init()
+    }
+
+    @available(macOS 15.0, *)
+    func panel(_ sender: Any, displayNameFor type: UTType) -> String? {
+        format(for: type)?.displayName
+    }
+
+    @available(macOS 15.0, *)
+    func panel(_ sender: Any, didSelect type: UTType?) {
+        guard let format = format(for: type) else { return }
+        selectedFormat = format
+        panel.nameFieldStringValue = suggestedFilename(for: format, preserveCurrentBaseName: true)
+    }
+
+    private func format(for contentType: UTType?) -> ContentView.TranscriptExportFormat? {
+        guard let contentType else { return nil }
+        return formats.first(where: { $0.contentType == contentType })
+    }
+
+    private func suggestedFilename(
+        for format: ContentView.TranscriptExportFormat,
+        preserveCurrentBaseName: Bool
+    ) -> String {
+        guard preserveCurrentBaseName else {
+            return format.suggestedFilename(hasSpeakerLabels: hasSpeakerLabels)
+        }
+
+        let currentName = panel.nameFieldStringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !currentName.isEmpty else {
+            return format.suggestedFilename(hasSpeakerLabels: hasSpeakerLabels)
+        }
+
+        let baseName = URL(fileURLWithPath: currentName).deletingPathExtension().lastPathComponent
+        guard !baseName.isEmpty else {
+            return format.suggestedFilename(hasSpeakerLabels: hasSpeakerLabels)
+        }
+        return "\(baseName).\(format.preferredPathExtension)"
     }
 }
 #endif
