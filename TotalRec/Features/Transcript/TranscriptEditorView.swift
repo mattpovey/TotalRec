@@ -172,7 +172,7 @@ private struct TranscriptFindReplaceCard: View {
                 }
 
                 Button("Replace All", action: onReplaceAll)
-                    .buttonStyle(.borderedProminent)
+                    .totalRecGlassButton(prominent: true)
                     .disabled(searchText.isEmpty || matchCount == 0)
 
                 Button("Clear") {
@@ -180,7 +180,7 @@ private struct TranscriptFindReplaceCard: View {
                     replacementText = ""
                     showMatchingClipsOnly = false
                 }
-                .buttonStyle(.bordered)
+                .totalRecGlassButton()
                 .disabled(searchText.isEmpty && replacementText.isEmpty)
 
                 Spacer(minLength: 0)
@@ -194,11 +194,7 @@ private struct TranscriptFindReplaceCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.gray.opacity(0.12), lineWidth: 1)
-        )
+        .totalRecStaticPanel(cornerRadius: 16)
     }
 }
 
@@ -293,23 +289,21 @@ private struct TranscriptTextInspectorCard: View {
                     .font(.body)
                     .frame(minHeight: 120)
                     .padding(10)
-                    .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.secondary.opacity(0.18))
-                    )
+                    .totalRecReadableInset(cornerRadius: 12)
 
                 HStack(spacing: 8) {
-                    Button("Save") {
+                    Button {
                         onSaveText(draftText, selectedSegment.id)
+                    } label: {
+                        Label("Save", systemImage: "checkmark.circle")
                     }
-                    .buttonStyle(.borderedProminent)
+                    .totalRecGlassButton(prominent: true)
                     .disabled(!canSave)
 
                     Button("Revert") {
                         draftText = selectedSegment.text
                     }
-                    .buttonStyle(.bordered)
+                    .totalRecGlassButton()
                     .disabled(draftText == selectedSegment.text)
 
                     Spacer(minLength: 0)
@@ -324,11 +318,7 @@ private struct TranscriptTextInspectorCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.gray.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.gray.opacity(0.12), lineWidth: 1)
-        )
+        .totalRecStaticRoundedRect(cornerRadius: 14)
         .onChange(of: selectedSegment.text) { _, newValue in
             draftText = newValue
         }
@@ -358,28 +348,22 @@ private struct TranscriptRawTextEditorCard: View {
                 .font(.body)
                 .frame(minHeight: 360)
                 .padding(10)
-                .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.secondary.opacity(0.18))
-                )
+                .totalRecReadableInset(cornerRadius: 12)
 
             HStack(spacing: 8) {
-                Button("Save", action: onSave)
-                    .buttonStyle(.borderedProminent)
+                Button(action: onSave) {
+                    Label("Save", systemImage: "checkmark.circle")
+                }
+                    .totalRecGlassButton(prominent: true)
 
                 Button("Revert", action: onRevert)
-                    .buttonStyle(.bordered)
+                    .totalRecGlassButton()
 
                 Spacer(minLength: 0)
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.gray.opacity(0.12), lineWidth: 1)
-        )
+        .totalRecStaticPanel(cornerRadius: 16)
     }
 }

@@ -1,7 +1,17 @@
 import Foundation
 import Speech
 
-final class FileTranscriber {
+protocol AudioTranscribing: AnyObject {
+    func transcribeFile(
+        at url: URL,
+        localeID: String,
+        onDevicePreferred: Bool,
+        onProgress: @escaping (String) -> Void,
+        completion: @escaping (Result<String, Error>) -> Void
+    )
+}
+
+final class FileTranscriber: AudioTranscribing {
     private var task: SFSpeechRecognitionTask?
 
     func transcribeFile(at url: URL,
@@ -69,4 +79,3 @@ final class FileTranscriber {
         }
     }
 }
-

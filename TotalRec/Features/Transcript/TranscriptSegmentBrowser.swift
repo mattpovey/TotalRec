@@ -72,19 +72,15 @@ struct TranscriptSegmentBrowser<InlineInspector: View>: View {
                                         )
                                     )
                                     .id(inspectorAnchorID(for: segment.id))
-                                    .transition(.opacity.combined(with: .move(edge: .top)))
                                 }
                             }
                         }
                     }
                     .frame(minHeight: 420)
-                    .animation(.easeInOut(duration: 0.16), value: playbackController.selectedSegmentID)
                     .onChange(of: playbackController.selectedSegmentID) { _, newValue in
                         guard let newValue else { return }
                         DispatchQueue.main.async {
-                            withAnimation(.easeInOut(duration: 0.18)) {
-                                proxy.scrollTo(inspectorAnchorID(for: newValue), anchor: .center)
-                            }
+                            proxy.scrollTo(inspectorAnchorID(for: newValue), anchor: .center)
                         }
                     }
                 }
@@ -189,11 +185,7 @@ struct TranscriptSegmentDetailBlock: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(TranscriptSegmentBrowserColors.detailBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(TranscriptSegmentBrowserColors.detailBorder, lineWidth: 1)
-        )
+        .totalRecStaticRoundedRect(cornerRadius: 12)
     }
 }
 
@@ -216,11 +208,11 @@ private struct TranscriptSegmentRow: View {
                 if isActive {
                     Label("Playing · Click Again To Stop", systemImage: "speaker.wave.2.fill")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.green)
+                        .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.successGreen))
                 } else if segment.start == nil {
                     Label("No timing", systemImage: "clock.badge.xmark")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.warningAmber))
                 }
             }
 
@@ -228,7 +220,7 @@ private struct TranscriptSegmentRow: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(speakerDisplay)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                        .foregroundStyle(.primary)
                     Spacer()
                 }
             }
@@ -245,13 +237,12 @@ private struct TranscriptSegmentRow: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(borderColor, lineWidth: 1)
         )
-        .shadow(color: TranscriptSegmentBrowserColors.panelShadow, radius: 2, y: 1)
         .opacity(isEmphasized ? 1 : 0.66)
     }
 
     private var backgroundColor: Color {
         if isActive {
-            return Color.green.opacity(0.10)
+            return TotalRecGlass.successGreen.opacity(0.10)
         }
         if isSelected {
             return Color.accentColor.opacity(0.10)
@@ -261,7 +252,7 @@ private struct TranscriptSegmentRow: View {
 
     private var borderColor: Color {
         if isActive {
-            return Color.green.opacity(0.35)
+            return TotalRecGlass.successGreen.opacity(0.28)
         }
         if isSelected {
             return Color.accentColor.opacity(0.35)
@@ -289,12 +280,7 @@ private struct TranscriptSegmentBrowserPanel<Content: View>: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(TranscriptSegmentBrowserColors.panelBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(TranscriptSegmentBrowserColors.panelBorder, lineWidth: 1)
-        )
-        .shadow(color: TranscriptSegmentBrowserColors.panelShadow, radius: 6, y: 2)
+        .totalRecStaticPanel(cornerRadius: 16)
     }
 }
 
@@ -355,13 +341,8 @@ private struct TranscriptPlaybackTransportButton<Label: View>: View {
                 .foregroundStyle(symbolColor)
                 .frame(minWidth: 34, minHeight: 28)
                 .padding(.horizontal, 8)
-                .background(buttonFill, in: Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(buttonStroke, lineWidth: 1)
-                )
         }
-        .buttonStyle(.plain)
+        .totalRecGlassButton(tint: backgroundColor)
         .disabled(!isEnabled)
         .accessibilityLabel(tooltip)
         .opacity(isEnabled ? 1 : 0.45)
@@ -376,14 +357,6 @@ private struct TranscriptPlaybackTransportButton<Label: View>: View {
             isHovered = hovering
         }
         .zIndex(isHovered ? 10 : 0)
-    }
-
-    private var buttonFill: Color {
-        isEnabled ? backgroundColor : backgroundColor.opacity(0.35)
-    }
-
-    private var buttonStroke: Color {
-        symbolColor.opacity(isEnabled ? 0.32 : 0.18)
     }
 }
 
@@ -428,13 +401,8 @@ private struct TranscriptContextPlaybackButton: View {
             .foregroundStyle(symbolColor)
             .frame(minWidth: 34, minHeight: 28)
             .padding(.horizontal, 8)
-            .background(buttonFill, in: Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(buttonStroke, lineWidth: 1)
-            )
         }
-        .buttonStyle(.plain)
+        .totalRecGlassButton(tint: backgroundColor)
         .disabled(!isEnabled)
         .accessibilityLabel("Play the selected clip with surrounding context.")
         .opacity(isEnabled ? 1 : 0.45)
@@ -454,14 +422,6 @@ private struct TranscriptContextPlaybackButton: View {
         }
         .zIndex(tooltip == nil ? 0 : 10)
     }
-
-    private var buttonFill: Color {
-        isEnabled ? backgroundColor : backgroundColor.opacity(0.35)
-    }
-
-    private var buttonStroke: Color {
-        symbolColor.opacity(isEnabled ? 0.32 : 0.18)
-    }
 }
 
 private struct TranscriptPlaybackTooltipBubble: View {
@@ -470,16 +430,11 @@ private struct TranscriptPlaybackTooltipBubble: View {
     var body: some View {
         Text(text)
             .font(.caption)
-            .foregroundStyle(.white)
+            .foregroundStyle(.primary)
             .multilineTextAlignment(.center)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Color.black.opacity(0.86), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.18), radius: 8, y: 3)
+            .totalRecGlassRoundedRect(cornerRadius: 8)
             .fixedSize()
             .allowsHitTesting(false)
     }
@@ -514,8 +469,6 @@ private enum TranscriptSegmentBrowserColors {
     static let selectionStripBackground = Color.gray.opacity(0.08)
     static let selectionStripBorder = Color.gray.opacity(0.2)
     #endif
-
-    static let panelShadow = Color.black.opacity(0.05)
     static let playButtonBackground = Color(red: 0.63, green: 0.90, blue: 0.67)
     static let playButtonSymbol = Color(red: 0.09, green: 0.34, blue: 0.14)
     static let stopButtonBackground = Color(red: 0.95, green: 0.63, blue: 0.63)

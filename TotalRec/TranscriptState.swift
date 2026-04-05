@@ -1,6 +1,6 @@
 import Foundation
 
-struct TranscriptSegment: Identifiable, Codable, Equatable {
+struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     var id: UUID
     var speakerLabel: String?
     var text: String
@@ -16,8 +16,8 @@ struct TranscriptSegment: Identifiable, Codable, Equatable {
     }
 }
 
-struct TranscriptState: Codable, Equatable {
-    struct PlaybackRange: Equatable {
+struct TranscriptState: Codable, Equatable, Sendable {
+    struct PlaybackRange: Equatable, Sendable {
         let start: TimeInterval
         let end: TimeInterval
     }

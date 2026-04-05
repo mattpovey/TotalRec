@@ -240,12 +240,11 @@ struct TranscriptSpeakersView: View {
                                                 .textSelection(.enabled)
                                                 .padding(10)
                                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                                .background(Color.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                                .totalRecReadableInset(cornerRadius: 8)
                                         }
                                     }
                                     .padding()
-                                    .background(Color.gray.opacity(0.08))
-                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                                    .totalRecStaticRoundedRect(cornerRadius: 10)
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -261,6 +260,7 @@ struct TranscriptSpeakersView: View {
                     Button("Edit manually") {
                         viewModel.chooseManualEditing()
                     }
+                    .totalRecGlassButton()
                     .accessibilityIdentifier("manualEditButton")
 
                     Spacer()
@@ -268,13 +268,14 @@ struct TranscriptSpeakersView: View {
                     Button("Retry") {
                         viewModel.retrySuggestions()
                     }
+                    .totalRecGlassButton()
                     .accessibilityIdentifier("retrySuggestionsButton")
 
                     Button("Apply") {
                         viewModel.applySuggestions()
                         syncAliasesToTranscript()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .totalRecGlassButton(prominent: true)
                     .accessibilityIdentifier("applySuggestionsButton")
                 }
                 .padding(.horizontal)
@@ -308,11 +309,7 @@ struct TranscriptSpeakersView: View {
                     }
                     .font(.body)
                     .padding(10)
-                    .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.secondary.opacity(0.18))
-                    )
+                    .totalRecReadableInset(cornerRadius: 12)
                     .accessibilityIdentifier("excerptEditor_\(label)")
                 }
                 .padding(20)
@@ -419,13 +416,15 @@ private struct TranscriptSpeakerActionCard: View {
                 : "Rename aliases, play one speaker at a time, and keep consolidation as an explicit action."
         ) {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    TranscriptSummaryChip(title: "\(speakerCount) speakers", systemImage: "person.2.fill", tint: .indigo)
-                    TranscriptSummaryChip(title: "\(turnCount) turns", systemImage: "text.alignleft", tint: .blue)
-                    if hasConsecutiveSpeakerRuns {
-                        TranscriptSummaryChip(title: "Merge recommended", systemImage: "arrow.triangle.merge", tint: .orange)
+                TotalRecGlassCluster(spacing: 12) {
+                    HStack(spacing: 8) {
+                        TranscriptSummaryChip(title: "\(speakerCount) speakers", systemImage: "person.2.fill", tint: TotalRecGlass.transcriptViolet)
+                        TranscriptSummaryChip(title: "\(turnCount) turns", systemImage: "text.alignleft", tint: TotalRecGlass.captureBlue)
+                        if hasConsecutiveSpeakerRuns {
+                            TranscriptSummaryChip(title: "Merge recommended", systemImage: "arrow.triangle.merge", tint: TotalRecGlass.warningAmber)
+                        }
+                        Spacer(minLength: 0)
                     }
-                    Spacer(minLength: 0)
                 }
 
                 ViewThatFits(in: .horizontal) {
@@ -465,16 +464,16 @@ private struct TranscriptSpeakerActionCard: View {
         Group {
             if BuildFeatures.nameSuggestionsEnabled {
                 Button(isRequestInFlight ? "Requesting…" : "Request Suggestions", action: onRequestSuggestions)
-                    .buttonStyle(.bordered)
+                    .totalRecGlassButton()
                     .disabled(isRequestInFlight || !areSuggestionsEnabled || speakerCount == 0)
             }
 
             Button("Consolidate Consecutive Speakers", action: onConsolidateSpeakers)
-                .buttonStyle(.bordered)
+                .totalRecGlassButton()
                 .disabled(!hasConsecutiveSpeakerRuns)
 
             Button("Reset Speaker Names", action: onResetAliases)
-                .buttonStyle(.bordered)
+                .totalRecGlassButton()
                 .disabled(!hasCustomSpeakerAliases)
         }
     }
@@ -531,7 +530,7 @@ private struct TranscriptSpeakerRow: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(speaker.alias)
                     .font(.headline)
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                    .foregroundStyle(.primary)
                 Spacer()
                 Text("Label \(speaker.label)")
                     .font(.caption)
@@ -550,7 +549,7 @@ private struct TranscriptSpeakerRow: View {
                 if isSelected {
                     Label("Selected", systemImage: "checkmark.circle.fill")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(TotalRecGlass.accentForeground(.accentColor))
                 }
             }
         }
@@ -585,10 +584,12 @@ private struct TranscriptSpeakerDetailCard: View {
         ) {
             if let speaker {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 8) {
-                        TranscriptSummaryChip(title: "Raw label \(speaker.label)", systemImage: "tag", tint: .secondary)
-                        TranscriptSummaryChip(title: "\(speakerTurnCount) turns", systemImage: "waveform", tint: .blue)
-                        Spacer(minLength: 0)
+                    TotalRecGlassCluster(spacing: 12) {
+                        HStack(spacing: 8) {
+                            TranscriptSummaryChip(title: "Raw label \(speaker.label)", systemImage: "tag", tint: .secondary)
+                            TranscriptSummaryChip(title: "\(speakerTurnCount) turns", systemImage: "waveform", tint: TotalRecGlass.captureBlue)
+                            Spacer(minLength: 0)
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
@@ -617,11 +618,7 @@ private struct TranscriptSpeakerDetailCard: View {
                                     .textSelection(.enabled)
                                     .padding(12)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                            .stroke(Color.secondary.opacity(0.18))
-                                    )
+                                    .totalRecReadableInset(cornerRadius: 10)
 
                                 Button {
                                     onEditExcerpt(speaker.label)
@@ -629,7 +626,7 @@ private struct TranscriptSpeakerDetailCard: View {
                                     Label("Edit Suggestion Excerpt", systemImage: "square.and.pencil")
                                 }
                                 .font(.caption.weight(.semibold))
-                                .buttonStyle(.bordered)
+                                .totalRecGlassButton()
                                 .controlSize(.small)
                                 .disabled(isRequestInFlight)
                             }
@@ -835,11 +832,7 @@ private struct TranscriptSpeakerInspectorCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.gray.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.gray.opacity(0.12), lineWidth: 1)
-        )
+        .totalRecStaticRoundedRect(cornerRadius: 14)
     }
 
     private func speakerOptionLabel(for label: String) -> String {
@@ -864,8 +857,8 @@ private struct TranscriptSuggestionOverlay: View {
                     .foregroundStyle(.secondary)
             }
             .padding(24)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-            .shadow(radius: 12)
+            .totalRecGlassPanel(cornerRadius: 16, tint: TotalRecGlass.transcriptViolet)
+            .glassEffectTransition(.materialize)
         }
     }
 }
@@ -889,11 +882,7 @@ private struct TranscriptWorkspacePanel<Content: View>: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.gray.opacity(0.12), lineWidth: 1)
-        )
+        .totalRecStaticPanel(cornerRadius: 16)
     }
 }
 
@@ -903,12 +892,17 @@ private struct TranscriptSummaryChip: View {
     let tint: Color
 
     var body: some View {
-        Label(title, systemImage: systemImage)
-            .font(.caption.weight(.semibold))
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .foregroundStyle(TotalRecGlass.accentForeground(tint))
+            Text(title)
+                .foregroundStyle(.primary)
+        }
+        .font(.caption.weight(.semibold))
+        .lineLimit(1)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .foregroundStyle(tint)
-            .background(tint.opacity(0.10), in: Capsule())
+            .totalRecGlassPill(tint: tint)
     }
 }
 

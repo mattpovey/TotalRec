@@ -9,18 +9,42 @@ struct MenuBarRecorderView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
-                Label(appModel.menuBarTitle, systemImage: appModel.menuBarIconName)
-                    .font(.headline)
+                HStack(spacing: 8) {
+                    TotalRecActivitySymbol(
+                        systemImage: activeStage?.totalRecMenuBarIconName ?? appModel.menuBarIconName,
+                        tint: activeStage?.totalRecStatusTint ?? SessionStage.idle.totalRecStatusTint,
+                        motion: activeStage?.totalRecActivityMotion ?? .none,
+                        size: 15,
+                        weight: .bold
+                    )
+                    Text(appModel.menuBarTitle)
+                        .font(.headline)
+                }
                 Spacer()
                 Button("Open Window") {
                     openMainWindow()
                 }
-                .buttonStyle(.borderless)
+                .totalRecGlassButton()
             }
 
-            Text(appModel.revealMainStatus())
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            if let activeStage {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(activeStage.totalRecProgressHeadline)
+                        .font(.subheadline.weight(.semibold))
+                    Text(appModel.statusText)
+                        .font(.footnote)
+                        .foregroundStyle(.primary)
+                    Text(activeStage.totalRecProgressSupportText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(10)
+                .totalRecStaticRoundedRect(cornerRadius: 12, tint: activeStage.totalRecStatusTint)
+            } else {
+                Text(appModel.revealMainStatus())
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
 
             if appModel.isRecording, let startedAt = appModel.recordingStartedAt {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -43,7 +67,7 @@ struct MenuBarRecorderView: View {
                         Button("Keep Recording") {
                             isStopConfirmationVisible = false
                         }
-                        .buttonStyle(.bordered)
+                        .totalRecGlassButton()
 
                         Spacer()
 
@@ -51,11 +75,11 @@ struct MenuBarRecorderView: View {
                             isStopConfirmationVisible = false
                             Task { await appModel.stopRecording() }
                         }
-                        .buttonStyle(.borderedProminent)
+                        .totalRecGlassButton(prominent: true)
                     }
                 }
                 .padding(10)
-                .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                .totalRecGlassRoundedRect(cornerRadius: 10, tint: TotalRecGlass.recordingRed)
             } else {
                 actionRow
             }
@@ -68,13 +92,14 @@ struct MenuBarRecorderView: View {
                     if let error = session.lastError, !error.isEmpty {
                         Text(error)
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.warningAmber))
                     }
                 }
             }
         }
         .padding(14)
         .frame(width: 320)
+        .totalRecGlassPanel(cornerRadius: 18)
     }
 
     @ViewBuilder
@@ -83,7 +108,7 @@ struct MenuBarRecorderView: View {
             Button("Stop Recording…") {
                 isStopConfirmationVisible = true
             }
-            .buttonStyle(.borderedProminent)
+            .totalRecGlassButton(prominent: true)
         } else if appModel.hasProtectedActivity {
             Text("Processing is in progress. Use the main window for detailed controls.")
                 .font(.caption)
@@ -96,7 +121,7 @@ struct MenuBarRecorderView: View {
                     }
                 }
             }
-            .buttonStyle(.borderedProminent)
+            .totalRecGlassButton(prominent: true)
         }
     }
 
@@ -110,4 +135,9 @@ struct MenuBarRecorderView: View {
         formatter.zeroFormattingBehavior = [.pad]
         return formatter
     }()
+
+    private var activeStage: SessionStage? {
+        guard let stage = appModel.activeSession?.stage, stage.totalRecShowsLiveActivity else { return nil }
+        return stage
+    }
 }

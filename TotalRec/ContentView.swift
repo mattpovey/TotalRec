@@ -96,6 +96,49 @@ struct ContentView: View {
         }
     }
 
+    enum InsightArtifactExportFormat: String, CaseIterable, Identifiable {
+        case plainText
+        case json
+
+        var id: String { rawValue }
+
+        var displayName: String {
+            switch self {
+            case .plainText:
+                return "Plain Text (.txt)"
+            case .json:
+                return "JSON (.json)"
+            }
+        }
+
+        var contentType: UTType {
+            switch self {
+            case .plainText:
+                return .plainText
+            case .json:
+                return .json
+            }
+        }
+
+        var preferredPathExtension: String {
+            switch self {
+            case .plainText:
+                return "txt"
+            case .json:
+                return "json"
+            }
+        }
+
+        func suggestedFilename(for artifact: InsightArtifact) -> String {
+            switch self {
+            case .plainText:
+                return "\(artifact.workflow.fileSlug).txt"
+            case .json:
+                return "\(artifact.workflow.fileSlug).json"
+            }
+        }
+    }
+
     @EnvironmentObject private var appModel: AppModel
 
     @State private var showStartFreshRecordingPrompt = false
@@ -106,17 +149,32 @@ struct ContentView: View {
     @State private var knownSpeakerRefsInputs = Array(repeating: "", count: 4)
     @State private var showSettingsSheet = false
     @State private var openAIAPIKey: String = ""
+    @State private var sambaNovaAPIKey: String = ""
+    @State private var sambaNovaBaseURL: String = LLMProvider.sambaNova.defaultBaseURL
     @State private var tScriptConfiguration = TScriptConfiguration()
     @State private var tScriptModelsResponse: TScriptModelsResponse?
     @State private var isTScriptModelsLoading = false
     @State private var tScriptModelsError: String?
+    @State private var defaultInsightProvider: LLMProvider = .openAI
+    @State private var defaultInsightModelID: String = LLMProvider.openAI.defaultModelID(for: .insights)
+    @State private var nameSuggestionModelID: String = LLMProvider.openAI.defaultModelID(for: .nameSuggestions)
+    @State private var openAIModels: [ProviderModelDescriptor] = []
+    @State private var sambaNovaModels: [ProviderModelDescriptor] = []
+    @State private var openAIModelsUpdatedAt: Date?
+    @State private var sambaNovaModelsUpdatedAt: Date?
+    @State private var isOpenAIModelsLoading = false
+    @State private var isSambaNovaModelsLoading = false
+    @State private var openAIModelsError: String?
+    @State private var sambaNovaModelsError: String?
     @AppStorage("openAIChunkingStrategy") private var openAIChunkingStrategy: String = "auto"
     @State private var provider: TranscriptionProvider = .appleCloud
     @State private var nameSuggestionProvider: NameSuggestionProvider = .buildDefault
+    @State private var defaultInsightWorkflow: InsightWorkflow = .fallbackDefault
     @State private var selectedSection: WorkflowSection = .capture
     @State private var selectedTranscriptStep: TranscriptWorkspaceStep = .run
-    @State private var customInsightsPrompt = MeetingNotesService.defaultPrompt
-    @State private var selectedInsightsPreset = MeetingNotesService.Preset.meetingNotes
+    @State private var loadedTranscriptSteps: Set<TranscriptWorkspaceStep> = [.run]
+    @State private var customInsightsPrompt = InsightWorkflow.meetingNotes.promptTemplate
+    @State private var selectedInsightWorkflow = InsightWorkflow.meetingNotes
     @State private var useCustomInsightsPrompt = false
     @State private var isKnownSpeakerHintsExpanded = false
     @State private var isTScriptAdvancedOptionsExpanded = false
@@ -125,12 +183,25 @@ struct ContentView: View {
     @State private var pendingTranscriptNavigationAfterTranscription = false
 
     private let nameSuggestionService = NameSuggestionService()
+    private let llmModelCatalogService = LLMModelCatalogService()
 
     init() {
         let config = AIConfigManager.shared.configuration
         _provider = State(initialValue: TranscriptionProvider.fromStoredValue(config.defaultProvider))
         _openAIAPIKey = State(initialValue: AIConfigManager.shared.openAIKey() ?? "")
+        _sambaNovaAPIKey = State(initialValue: AIConfigManager.shared.sambaNovaKey() ?? "")
+        _sambaNovaBaseURL = State(initialValue: AIConfigManager.shared.baseURL(for: .sambaNova))
         _tScriptConfiguration = State(initialValue: config.tscript)
+        _defaultInsightWorkflow = State(initialValue: config.normalizedInsightWorkflow)
+        _defaultInsightProvider = State(initialValue: config.normalizedInsightProvider)
+        _defaultInsightModelID = State(initialValue: config.defaultInsightModelID)
+        _nameSuggestionModelID = State(initialValue: config.nameSuggestionModelID)
+        _openAIModels = State(initialValue: config.openAI.cachedModels)
+        _sambaNovaModels = State(initialValue: config.sambaNova.cachedModels)
+        _openAIModelsUpdatedAt = State(initialValue: config.openAI.modelsUpdatedAt)
+        _sambaNovaModelsUpdatedAt = State(initialValue: config.sambaNova.modelsUpdatedAt)
+        _selectedInsightWorkflow = State(initialValue: config.normalizedInsightWorkflow)
+        _customInsightsPrompt = State(initialValue: config.normalizedInsightWorkflow.promptTemplate)
         if let storedSuggestionProvider = NameSuggestionProvider(rawValue: config.nameSuggestionProvider.lowercased()),
            NameSuggestionProvider.allCases.contains(storedSuggestionProvider) {
             _nameSuggestionProvider = State(initialValue: storedSuggestionProvider)
@@ -163,6 +234,68 @@ struct ContentView: View {
 
     private var isOpenAIKeyConfigured: Bool {
         !openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var isSambaNovaKeyConfigured: Bool {
+        !sambaNovaAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var resolvedInsightModelID: String {
+        let configured = defaultInsightModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            return configured
+        }
+        return AIConfigManager.shared.resolvedModelID(for: .insights, provider: defaultInsightProvider)
+    }
+
+    private var resolvedNameSuggestionModelID: String {
+        let configured = nameSuggestionModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            return configured
+        }
+        if let llmProvider = nameSuggestionProvider.llmProvider {
+            return AIConfigManager.shared.resolvedModelID(for: .nameSuggestions, provider: llmProvider)
+        }
+        return ""
+    }
+
+    private func isAPIKeyConfigured(for provider: LLMProvider) -> Bool {
+        switch provider {
+        case .openAI:
+            return isOpenAIKeyConfigured
+        case .sambaNova:
+            return isSambaNovaKeyConfigured
+        }
+    }
+
+    private func llmModels(for provider: LLMProvider) -> [ProviderModelDescriptor] {
+        switch provider {
+        case .openAI:
+            return openAIModels
+        case .sambaNova:
+            return sambaNovaModels
+        }
+    }
+
+    private func availableModels(for provider: LLMProvider, feature: LLMFeature) -> [ProviderModelDescriptor] {
+        llmModels(for: provider).filter { $0.supports(feature: feature) }
+    }
+
+    private func displayName(for modelID: String, provider: LLMProvider) -> String {
+        let trimmed = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return provider.defaultModelID(for: .insights) }
+        return llmModels(for: provider).first(where: { $0.id == trimmed })?.displayName ?? trimmed
+    }
+
+    private var insightProviderSummary: String {
+        "\(defaultInsightProvider.displayName) • \(displayName(for: resolvedInsightModelID, provider: defaultInsightProvider))"
+    }
+
+    private var nameSuggestionProviderSummary: String {
+        guard let llmProvider = nameSuggestionProvider.llmProvider else {
+            return nameSuggestionProvider.displayName
+        }
+        return "\(llmProvider.displayName) • \(displayName(for: resolvedNameSuggestionModelID, provider: llmProvider))"
     }
 
     private var tScriptBaseURLConfigured: Bool {
@@ -200,7 +333,7 @@ struct ContentView: View {
                 title: "Server URL required",
                 detail: "Add the TScript server base URL in Settings before using this provider.",
                 systemImage: "network.slash",
-                tint: .orange
+                tint: TotalRecGlass.warningAmber
             )
         }
         if tScriptRequiresHTTPOverride {
@@ -208,7 +341,7 @@ struct ContentView: View {
                 title: "Secure connection required",
                 detail: "This TScript endpoint uses HTTP. Enable the insecure HTTP override in Settings only if you trust this server and network.",
                 systemImage: "lock.trianglebadge.exclamationmark",
-                tint: .orange
+                tint: TotalRecGlass.warningAmber
             )
         }
         if tScriptUsesHTTPOverride {
@@ -216,7 +349,7 @@ struct ContentView: View {
                 title: "HTTP override enabled",
                 detail: "TScript is using plain HTTP because you explicitly allowed it for this private server.",
                 systemImage: "exclamationmark.shield.fill",
-                tint: .orange
+                tint: TotalRecGlass.warningAmber
             )
         }
         if tScriptConfiguration.allowInvalidTLSCertificates {
@@ -224,14 +357,14 @@ struct ContentView: View {
                 title: "TLS override enabled",
                 detail: "The app will accept an invalid TLS certificate for this TScript host. Use this only for a server you control.",
                 systemImage: "checkmark.shield.fill",
-                tint: .orange
+                tint: TotalRecGlass.warningAmber
             )
         }
         return ReadinessItem(
             title: "Secure connection ready",
             detail: "TScript is configured to use HTTPS for model discovery and transcription.",
             systemImage: "lock.shield.fill",
-            tint: .green
+            tint: TotalRecGlass.successGreen
         )
     }
 
@@ -366,7 +499,7 @@ struct ContentView: View {
                         ? "Start a protected recording or import audio into this session."
                         : "Audio has been prepared\(formattedDurationSuffix) and is ready for transcription."),
                 systemImage: appModel.isRecording ? "record.circle.fill" : (appModel.audioURL == nil ? "waveform.badge.plus" : "checkmark.circle.fill"),
-                tint: appModel.isRecording ? .red : (appModel.audioURL == nil ? .blue : .green)
+                tint: appModel.isRecording ? TotalRecGlass.recordingRed : (appModel.audioURL == nil ? TotalRecGlass.captureBlue : TotalRecGlass.successGreen)
             ),
             screenCaptureReadinessItem,
             microphoneReadinessItem,
@@ -376,7 +509,7 @@ struct ContentView: View {
                     ? "This session is locked while recording or processing is active."
                     : "Session switching and exports are safe right now.",
                 systemImage: appModel.hasProtectedActivity ? "lock.shield.fill" : "checkmark.shield.fill",
-                tint: appModel.hasProtectedActivity ? .blue : .green
+                tint: appModel.hasProtectedActivity ? TotalRecGlass.captureBlue : TotalRecGlass.successGreen
             )
         ]
     }
@@ -389,7 +522,7 @@ struct ContentView: View {
                     ? "Capture or import audio before starting transcription."
                     : "The current session audio is available\(formattedDurationSuffix).",
                 systemImage: appModel.audioURL == nil ? "waveform.slash" : "waveform.badge.checkmark",
-                tint: appModel.audioURL == nil ? .orange : .green
+                tint: appModel.audioURL == nil ? TotalRecGlass.warningAmber : TotalRecGlass.successGreen
             ),
             ReadinessItem(
                 title: "Provider",
@@ -404,50 +537,52 @@ struct ContentView: View {
 
     private var insightsReadinessItems: [ReadinessItem] {
         let trimmedPrompt = customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let notesCount = appModel.meetingNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : appModel.meetingNotes.count
+        let artifactCount = appModel.insightArtifactContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : appModel.insightArtifactContent.count
+        let providerReady = isAPIKeyConfigured(for: defaultInsightProvider)
+        let insightModelName = displayName(for: resolvedInsightModelID, provider: defaultInsightProvider)
 
         return [
             ReadinessItem(
                 title: hasTranscriptDisplayText ? "Transcript ready" : "Transcript required",
                 detail: hasTranscriptDisplayText
-                    ? "The current session transcript is available for notes generation."
-                    : "Generate a transcript before creating meeting notes.",
-                systemImage: hasTranscriptDisplayText ? "text.quote.star" : "text.quote",
-                tint: hasTranscriptDisplayText ? .green : .orange
+                    ? "The current session transcript is available for artifact generation."
+                    : "Generate a transcript before creating an insight artifact.",
+                systemImage: hasTranscriptDisplayText ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
+                tint: hasTranscriptDisplayText ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
             ),
             ReadinessItem(
-                title: isOpenAIKeyConfigured ? "API key ready" : "API key required",
-                detail: isOpenAIKeyConfigured
-                    ? "OpenAI notes generation can run with the current key."
-                    : "Add an OpenAI API key in Settings before generating notes.",
-                systemImage: isOpenAIKeyConfigured ? "key.fill" : "exclamationmark.triangle.fill",
-                tint: isOpenAIKeyConfigured ? .green : .orange
+                title: providerReady ? "Provider ready" : "Provider setup required",
+                detail: providerReady
+                    ? "\(defaultInsightProvider.displayName) is configured to use \(insightModelName) for artifact generation."
+                    : "Add a \(defaultInsightProvider.displayName) API key in Settings before generating insights.",
+                systemImage: providerReady ? "key.fill" : "exclamationmark.triangle.fill",
+                tint: providerReady ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
             ),
             ReadinessItem(
                 title: useCustomInsightsPrompt
                     ? (trimmedPrompt.isEmpty ? "Custom prompt required" : "Custom prompt ready")
-                    : "Preset ready",
+                    : "Workflow ready",
                 detail: useCustomInsightsPrompt
                     ? (trimmedPrompt.isEmpty
-                        ? "Enter a custom prompt or switch back to the preset workflow."
-                        : "The custom prompt will override the \(selectedInsightsPreset.rawValue.lowercased()) preset on the next run.")
-                    : "\(selectedInsightsPreset.rawValue) is selected for the next notes run.",
+                        ? "Enter a custom prompt or switch back to the selected workflow."
+                        : "The custom prompt will override the \(selectedInsightWorkflow.displayName.lowercased()) workflow on the next run.")
+                    : "\(selectedInsightWorkflow.displayName) is selected for the next artifact run.",
                 systemImage: useCustomInsightsPrompt
                     ? (trimmedPrompt.isEmpty ? "text.badge.xmark" : "slider.horizontal.below.rectangle")
                     : "sparkles.rectangle.stack",
                 tint: useCustomInsightsPrompt
-                    ? (trimmedPrompt.isEmpty ? .orange : .indigo)
-                    : .green
+                    ? (trimmedPrompt.isEmpty ? TotalRecGlass.warningAmber : TotalRecGlass.transcriptViolet)
+                    : TotalRecGlass.successGreen
             ),
             ReadinessItem(
-                title: appModel.isGeneratingMeetingNotes ? "Notes in progress" : (notesCount == 0 ? "Notes pending" : "Notes saved"),
-                detail: appModel.isGeneratingMeetingNotes
-                    ? "A notes job is currently running for this session."
-                    : (notesCount == 0
-                        ? "Generate notes when you want a structured summary and action list."
-                        : "\(notesCount) characters of notes are already stored in this session."),
-                systemImage: appModel.isGeneratingMeetingNotes ? "hourglass" : (notesCount == 0 ? "list.bullet.rectangle" : "checkmark.rectangle.stack"),
-                tint: appModel.isGeneratingMeetingNotes ? .blue : (notesCount == 0 ? .secondary : .green)
+                title: appModel.isGeneratingInsightArtifact ? "Artifact in progress" : (artifactCount == 0 ? "Artifact pending" : "Artifact saved"),
+                detail: appModel.isGeneratingInsightArtifact
+                    ? "A streaming insight run is currently in progress for this session."
+                    : (artifactCount == 0
+                        ? "Generate an artifact when you want a structured transcript-derived output."
+                        : "\(artifactCount) characters are already saved in this session."),
+                systemImage: appModel.isGeneratingInsightArtifact ? "hourglass" : (artifactCount == 0 ? "list.bullet.rectangle" : "checkmark.rectangle.stack"),
+                tint: appModel.isGeneratingInsightArtifact ? TotalRecGlass.captureBlue : (artifactCount == 0 ? TotalRecGlass.neutralTint : TotalRecGlass.successGreen)
             )
         ]
     }
@@ -477,7 +612,7 @@ struct ContentView: View {
                     ? "OpenAI is configured and ready for diarized transcription."
                     : "Add an OpenAI API key in Settings before running this provider.",
                 systemImage: isOpenAIKeyConfigured ? "key.fill" : "exclamationmark.triangle.fill",
-                tint: isOpenAIKeyConfigured ? .green : .orange
+                tint: isOpenAIKeyConfigured ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
             )
         case .tscript:
             if !tScriptBaseURLConfigured ||
@@ -495,24 +630,24 @@ struct ContentView: View {
                 title = "Loading models"
                 detail = "Refreshing the TScript model registry for the current server."
                 icon = "arrow.triangle.2.circlepath"
-                tint = .blue
+                tint = TotalRecGlass.captureBlue
             } else if let error = tScriptModelsError, !error.isEmpty {
                 title = "Model registry needs attention"
                 detail = error
                 icon = "exclamationmark.triangle.fill"
-                tint = .orange
+                tint = TotalRecGlass.warningAmber
             } else if let model = selectedTScriptModel {
                 title = model.runtimeAvailable ? "Model ready" : "Model unavailable"
                 detail = model.runtimeAvailable
                     ? "\(model.displayName) is available on the current TScript server."
                     : "\(model.displayName) is currently unavailable on the current TScript server."
                 icon = model.runtimeAvailable ? "server.rack" : "server.rack"
-                tint = model.runtimeAvailable ? .green : .orange
+                tint = model.runtimeAvailable ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
             } else {
                 title = "Model registry pending"
                 detail = "Refresh models to inspect server capabilities and choose a specific TScript model."
                 icon = "square.stack.3d.up.slash"
-                tint = .secondary
+                tint = TotalRecGlass.neutralTint
             }
             return ReadinessItem(
                 title: title,
@@ -536,7 +671,7 @@ struct ContentView: View {
                 title: hasPartialKnownSpeaker ? "Speaker hints need attention" : "Upload mode",
                 detail: detail,
                 systemImage: hasPartialKnownSpeaker ? "person.crop.rectangle.stack.fill" : (openAIChunkingStrategy == "none" ? "arrow.up.doc" : "square.split.2x2"),
-                tint: hasPartialKnownSpeaker ? .orange : .indigo
+                tint: hasPartialKnownSpeaker ? TotalRecGlass.warningAmber : TotalRecGlass.transcriptViolet
             )
         case .tscript:
             let selectedModelName = selectedTScriptModel?.displayName ?? "Server default"
@@ -550,7 +685,7 @@ struct ContentView: View {
                 title: selectedTScriptModel?.supportsTimestamps == true || availableTScriptDiarizationModes.count > 1 ? "Model options" : "Model selection",
                 detail: "\(selectedModelName) selected. \(reviewMode). \(diarization).",
                 systemImage: "slider.horizontal.3",
-                tint: .indigo
+                tint: TotalRecGlass.transcriptViolet
             )
         case .appleOnDevice, .appleCloud:
             return ReadinessItem(
@@ -559,7 +694,7 @@ struct ContentView: View {
                     ? "Partial text appears below while Apple transcription runs."
                     : "Apple transcription can stream partial text into the live preview area while it runs.",
                 systemImage: appModel.isTranscribing ? "text.badge.clock" : "text.line.first.and.arrowtriangle.forward",
-                tint: appModel.isTranscribing ? .blue : .secondary
+                tint: appModel.isTranscribing ? TotalRecGlass.captureBlue : TotalRecGlass.neutralTint
             )
         }
     }
@@ -573,7 +708,7 @@ struct ContentView: View {
                 ? "System audio capture can start immediately."
                 : "Grant Screen Recording access before starting a system capture. Audio import still works without it.",
             systemImage: granted ? "display.badge.checkmark" : "exclamationmark.triangle.fill",
-            tint: granted ? .green : .orange
+            tint: granted ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
         )
 #else
         return ReadinessItem(
@@ -592,21 +727,21 @@ struct ContentView: View {
                 title: "Microphone ready",
                 detail: "Mic access is granted for system-plus-mic recordings.",
                 systemImage: "mic.fill",
-                tint: .green
+                tint: TotalRecGlass.successGreen
             )
         case .notDetermined:
             return ReadinessItem(
                 title: "Microphone permission pending",
                 detail: "macOS will ask for mic access the first time you start recording.",
                 systemImage: "mic.badge.plus",
-                tint: .blue
+                tint: TotalRecGlass.captureBlue
             )
         case .denied, .restricted:
             return ReadinessItem(
                 title: "Microphone access blocked",
                 detail: "Grant Microphone access in System Settings to capture your voice alongside system audio.",
                 systemImage: "mic.slash.fill",
-                tint: .orange
+                tint: TotalRecGlass.warningAmber
             )
         @unknown default:
             return ReadinessItem(
@@ -625,21 +760,21 @@ struct ContentView: View {
                 title: "Speech access ready",
                 detail: "Apple transcription has the speech-recognition permission it needs.",
                 systemImage: "waveform.badge.checkmark",
-                tint: .green
+                tint: TotalRecGlass.successGreen
             )
         case .notDetermined:
             return ReadinessItem(
                 title: "Speech permission pending",
                 detail: "The system will request speech-recognition permission the first time Apple transcription runs.",
                 systemImage: "waveform.badge.plus",
-                tint: .blue
+                tint: TotalRecGlass.captureBlue
             )
         case .denied, .restricted:
             return ReadinessItem(
                 title: "Speech access blocked",
                 detail: "Grant Speech Recognition access in System Settings before using the Apple providers.",
                 systemImage: "waveform.slash",
-                tint: .orange
+                tint: TotalRecGlass.warningAmber
             )
         @unknown default:
             return ReadinessItem(
@@ -675,8 +810,13 @@ struct ContentView: View {
                 items.append(DiagnosticItem(label: "Transcript", value: transcriptDiagnosticSummary))
             }
 
-            if !appModel.meetingNotes.isEmpty {
-                items.append(DiagnosticItem(label: "Meeting notes", value: "\(appModel.meetingNotes.count) characters saved"))
+            if let insightArtifact = appModel.insightArtifact, insightArtifact.hasContent {
+                items.append(
+                    DiagnosticItem(
+                        label: "Insight artifact",
+                        value: "\(insightArtifact.workflow.displayName), \(insightArtifact.content.count) characters saved"
+                    )
+                )
             }
         } else {
             items.append(DiagnosticItem(label: "Session", value: "No active session yet"))
@@ -699,11 +839,11 @@ struct ContentView: View {
         useCustomInsightsPrompt && customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var isMeetingNotesActionDisabled: Bool {
-        appModel.isGeneratingMeetingNotes ||
+    private var isInsightActionDisabled: Bool {
+        appModel.isGeneratingInsightArtifact ||
         !hasTranscriptDisplayText ||
         appModel.isTranscribing ||
-        !isOpenAIKeyConfigured ||
+        !isAPIKeyConfigured(for: defaultInsightProvider) ||
         hasInvalidCustomInsightsPrompt
     }
 
@@ -764,8 +904,16 @@ struct ContentView: View {
     private var contentWithChangeHandlers: some View {
         splitWorkspace
             .padding()
+            .background(
+                TotalRecAmbientBackground(
+                    accent: ambientAccentTint,
+                    secondaryAccent: ambientSecondaryTint
+                )
+            )
             .onAppear {
                 normalizeSelectedTranscriptStep(preferred: defaultTranscriptStep)
+                loadedTranscriptSteps.insert(selectedTranscriptStep)
+                syncInsightEditorState(from: appModel.activeSession?.insightSettings)
             }
             .onChange(of: appModel.transcriptState) { oldValue, newValue in
                 if pendingTranscriptNavigationAfterTranscription, oldValue != newValue {
@@ -786,13 +934,17 @@ struct ContentView: View {
             .onChange(of: appModel.activeSession?.id) { _, _ in
                 pendingTranscriptNavigationAfterTranscription = false
                 normalizeSelectedTranscriptStep(preferred: defaultTranscriptStep)
+                syncInsightEditorState(from: appModel.activeSession?.insightSettings)
             }
             .onChange(of: selectedSection) { _, newSection in
                 if newSection == .transcript {
                     normalizeSelectedTranscriptStep()
                 }
             }
-            .onChange(of: appModel.meetingNotes) { oldValue, newValue in
+            .onChange(of: selectedTranscriptStep) { _, newStep in
+                loadedTranscriptSteps.insert(newStep)
+            }
+            .onChange(of: appModel.insightArtifactContent) { oldValue, newValue in
                 if oldValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                    !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     selectedSection = .insights
@@ -807,8 +959,14 @@ struct ContentView: View {
             isPresented: $showStartFreshRecordingPrompt,
             titleVisibility: .visible
         ) {
-            Button("Save Audio…") { saveAudio() }
-            Button("Save Transcript…", action: saveTranscript)
+            Button {
+                saveAudio()
+            } label: {
+                Label("Save Audio…", systemImage: "square.and.arrow.down")
+            }
+            Button(action: saveTranscript) {
+                Label("Save Transcript…", systemImage: "square.and.arrow.down")
+            }
                 .disabled(appModel.transcriptState.isEmpty)
             Button("Start Fresh Recording", role: .destructive) {
                 appModel.startRecording()
@@ -850,7 +1008,7 @@ struct ContentView: View {
                 sessionPendingDeletion = nil
             }
         } message: { session in
-            Text("This removes the session and its saved audio, transcript, and notes from disk.")
+            Text("This removes the session and its saved audio, transcript, and insight artifact from disk.")
         }
         .alert(
             "Screen capture permission required",
@@ -888,8 +1046,38 @@ struct ContentView: View {
             .onChange(of: nameSuggestionProvider) { _, newProvider in
                 do {
                     try AIConfigManager.shared.setNameSuggestionProvider(newProvider.rawValue)
+                    nameSuggestionModelID = AIConfigManager.shared.configuration.nameSuggestionModelID
                 } catch {
                     appModel.setStatusMessage("Failed to save name suggestion provider: \(error.localizedDescription)")
+                }
+            }
+            .onChange(of: defaultInsightWorkflow) { _, newWorkflow in
+                do {
+                    try AIConfigManager.shared.setDefaultInsightWorkflow(newWorkflow)
+                } catch {
+                    appModel.setStatusMessage("Failed to save default insight workflow: \(error.localizedDescription)")
+                }
+            }
+            .onChange(of: defaultInsightProvider) { _, newProvider in
+                do {
+                    try AIConfigManager.shared.setDefaultInsightProvider(newProvider)
+                    defaultInsightModelID = AIConfigManager.shared.configuration.defaultInsightModelID
+                } catch {
+                    appModel.setStatusMessage("Failed to save default insight provider: \(error.localizedDescription)")
+                }
+            }
+            .onChange(of: defaultInsightModelID) { _, newModelID in
+                do {
+                    try AIConfigManager.shared.setDefaultInsightModelID(newModelID)
+                } catch {
+                    appModel.setStatusMessage("Failed to save default insight model: \(error.localizedDescription)")
+                }
+            }
+            .onChange(of: nameSuggestionModelID) { _, newModelID in
+                do {
+                    try AIConfigManager.shared.setNameSuggestionModelID(newModelID)
+                } catch {
+                    appModel.setStatusMessage("Failed to save name suggestion model: \(error.localizedDescription)")
                 }
             }
             .onChange(of: openAIAPIKey) { _, newKey in
@@ -899,16 +1087,30 @@ struct ContentView: View {
                     appModel.setStatusMessage("Failed to save OpenAI key: \(error.localizedDescription)")
                 }
             }
-            .onChange(of: tScriptConfiguration) { oldValue, newValue in
+            .onChange(of: sambaNovaAPIKey) { _, newKey in
                 do {
-                    try AIConfigManager.shared.updateTScriptConfiguration(newValue)
+                    try AIConfigManager.shared.updateSambaNovaKey(newKey.isEmpty ? nil : newKey)
                 } catch {
-                    appModel.setStatusMessage("Failed to save TScript settings: \(error.localizedDescription)")
+                    appModel.setStatusMessage("Failed to save SambaNova key: \(error.localizedDescription)")
                 }
-                if oldValue.baseURL.trimmingCharacters(in: .whitespacesAndNewlines) != newValue.baseURL.trimmingCharacters(in: .whitespacesAndNewlines) {
-                    tScriptModelsResponse = nil
-                    tScriptModelsError = nil
+            }
+            .onChange(of: sambaNovaBaseURL) { oldValue, newValue in
+                do {
+                    try AIConfigManager.shared.setBaseURL(newValue, for: .sambaNova)
+                    if oldValue.trimmingCharacters(in: .whitespacesAndNewlines) != newValue.trimmingCharacters(in: .whitespacesAndNewlines) {
+                        sambaNovaModels = []
+                        sambaNovaModelsUpdatedAt = nil
+                        sambaNovaModelsError = nil
+                        try AIConfigManager.shared.updateCachedModels([], for: .sambaNova)
+                        nameSuggestionModelID = AIConfigManager.shared.configuration.nameSuggestionModelID
+                        defaultInsightModelID = AIConfigManager.shared.configuration.defaultInsightModelID
+                    }
+                } catch {
+                    appModel.setStatusMessage("Failed to save SambaNova base URL: \(error.localizedDescription)")
                 }
+            }
+            .onChange(of: tScriptConfiguration) { oldValue, newValue in
+                handleTScriptConfigurationChange(oldValue: oldValue, newValue: newValue)
             }
             .onChange(of: tScriptConfiguration.selectedModelID) { _, _ in
                 guard let model = selectedTScriptModel else { return }
@@ -919,13 +1121,18 @@ struct ContentView: View {
             }
             .onChange(of: useCustomInsightsPrompt) { _, newValue in
                 if newValue && customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    customInsightsPrompt = selectedInsightsPreset.promptTemplate
+                    customInsightsPrompt = selectedInsightWorkflow.promptTemplate
                 }
+                persistInsightEditorState()
             }
-            .onChange(of: selectedInsightsPreset) { _, newPreset in
+            .onChange(of: selectedInsightWorkflow) { _, newWorkflow in
                 if !useCustomInsightsPrompt {
-                    customInsightsPrompt = newPreset.promptTemplate
+                    customInsightsPrompt = newWorkflow.promptTemplate
                 }
+                persistInsightEditorState()
+            }
+            .onChange(of: customInsightsPrompt) { _, _ in
+                persistInsightEditorState()
             }
     }
 
@@ -945,8 +1152,23 @@ struct ContentView: View {
             .sheet(isPresented: $showSettingsSheet) {
                 SettingsSheetView(
                     nameSuggestionProvider: $nameSuggestionProvider,
+                    defaultInsightWorkflow: $defaultInsightWorkflow,
+                    defaultInsightProvider: $defaultInsightProvider,
+                    defaultInsightModelID: $defaultInsightModelID,
+                    nameSuggestionModelID: $nameSuggestionModelID,
                     openAIAPIKey: $openAIAPIKey,
+                    sambaNovaAPIKey: $sambaNovaAPIKey,
+                    sambaNovaBaseURL: $sambaNovaBaseURL,
+                    openAIModels: openAIModels,
+                    sambaNovaModels: sambaNovaModels,
+                    openAIModelsUpdatedAt: openAIModelsUpdatedAt,
+                    sambaNovaModelsUpdatedAt: sambaNovaModelsUpdatedAt,
+                    isOpenAIModelsLoading: isOpenAIModelsLoading,
+                    isSambaNovaModelsLoading: isSambaNovaModelsLoading,
+                    openAIModelsError: openAIModelsError,
+                    sambaNovaModelsError: sambaNovaModelsError,
                     tScriptConfiguration: $tScriptConfiguration,
+                    onRefreshModels: refreshLLMModels(for:),
                     onClose: { showSettingsSheet = false }
                 )
                 .frame(minWidth: 520, minHeight: 340)
@@ -975,6 +1197,9 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             headerContent
             workspaceNavigation
+            if let currentLiveActivityStage {
+                activityBanner(for: currentLiveActivityStage)
+            }
             currentSectionContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
@@ -1001,7 +1226,7 @@ struct ContentView: View {
                     detailBadge(
                         elapsed,
                         systemImage: "record.circle.fill",
-                        tint: .red
+                        tint: TotalRecGlass.recordingRed
                     )
                 }
             }
@@ -1012,28 +1237,109 @@ struct ContentView: View {
                 statusBanner(
                     recoveryNotice,
                     systemImage: "arrow.triangle.2.circlepath.circle.fill",
-                    tint: .orange,
+                    tint: TotalRecGlass.warningAmber,
                     dismissAction: {
                         appModel.dismissRecoveryNotice()
                     }
                 )
             }
-
-            if appModel.hasProtectedActivity {
-                statusBanner(
-                    "This session is protected while recording or processing is active. Session switching is locked until the current work is safe.",
-                    systemImage: "lock.shield",
-                    tint: .blue
-                )
-            }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(Color.gray.opacity(0.12), lineWidth: 1)
-        )
+        .totalRecGlassPanel(cornerRadius: 20)
+    }
+
+    private var currentLiveActivityStage: SessionStage? {
+        guard let stage = appModel.activeSession?.stage, stage.totalRecShowsLiveActivity else { return nil }
+        return stage
+    }
+
+    private func activityBanner(for stage: SessionStage) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(TotalRecGlass.tonedTint(stage.totalRecStatusTint, usage: .secondarySurface).opacity(0.16))
+
+                TotalRecActivitySymbol(
+                    systemImage: stage.totalRecMenuBarIconName,
+                    tint: stage.totalRecStatusTint,
+                    motion: stage.totalRecActivityMotion,
+                    size: 20,
+                    weight: .bold
+                )
+            }
+            .frame(width: 48, height: 48)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(stage.totalRecProgressHeadline)
+                    .font(.headline)
+
+                Text(appModel.statusText)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.primary)
+
+                Text(activitySupportText(for: stage))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    activityMetaPill("Session locked", systemImage: "lock.fill", tint: TotalRecGlass.recordingRed)
+
+                    if stage == .recording, let elapsed = appModel.recordingElapsedText {
+                        activityMetaPill(elapsed, systemImage: "timer", tint: TotalRecGlass.recordingRed)
+                    }
+
+                    if stage == .transcribing, !appModel.processingPreviewText.isEmpty {
+                        activityMetaPill("Live preview", systemImage: "text.line.first.and.arrowtriangle.forward", tint: TotalRecGlass.successGreen)
+                    }
+
+                    if stage == .generatingInsights {
+                        insightStopButton
+                    }
+                }
+
+                VStack(alignment: .trailing, spacing: 8) {
+                    activityMetaPill("Session locked", systemImage: "lock.fill", tint: TotalRecGlass.recordingRed)
+
+                    if stage == .recording, let elapsed = appModel.recordingElapsedText {
+                        activityMetaPill(elapsed, systemImage: "timer", tint: TotalRecGlass.recordingRed)
+                    }
+
+                    if stage == .transcribing, !appModel.processingPreviewText.isEmpty {
+                        activityMetaPill("Live preview", systemImage: "text.line.first.and.arrowtriangle.forward", tint: TotalRecGlass.successGreen)
+                    }
+
+                    if stage == .generatingInsights {
+                        insightStopButton
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .totalRecStaticRoundedRect(cornerRadius: 16, tint: stage.totalRecStatusTint)
+    }
+
+    private func activitySupportText(for stage: SessionStage) -> String {
+        if stage == .generatingInsights, appModel.isStoppingInsightArtifact {
+            return "Stopping the current insight run. The session will unlock as soon as the stream cancels."
+        }
+        if stage == .transcribing, !appModel.processingPreviewText.isEmpty {
+            return "Partial text is updating live below while the transcript is assembled. Session switching stays locked until the run completes."
+        }
+        return stage.totalRecProgressSupportText
+    }
+
+    private func activityMetaPill(_ title: String, systemImage: String, tint: Color) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .totalRecStaticPill(tint: tint)
     }
 
     private var headerSubtitle: String {
@@ -1045,57 +1351,25 @@ struct ContentView: View {
 
     private var providerStatusBadge: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                detailBadge(
-                    provider.rawValue,
-                    systemImage: providerSystemImage,
-                    tint: workflowSectionTint(selectedSection)
-                )
-
-                if provider == .openAI {
-                    detailBadge(
-                        isOpenAIKeyConfigured ? "API key configured" : "API key missing",
-                        systemImage: isOpenAIKeyConfigured ? "checkmark.seal.fill" : "exclamationmark.triangle.fill",
-                        tint: isOpenAIKeyConfigured ? .green : .orange
-                    )
-                } else if provider == .tscript {
-                    detailBadge(
-                        selectedTScriptModel?.displayName ?? "Model registry pending",
-                        systemImage: selectedTScriptModel == nil ? "server.rack" : "square.stack.3d.up.fill",
-                        tint: selectedTScriptModel == nil ? .secondary : .green
-                    )
-                }
-
-                if let activeSession = appModel.activeSession {
-                    detailBadge(
-                        activeSession.sourceDescription,
-                        systemImage: "square.stack.3d.up",
-                        tint: .secondary
-                    )
-                }
-
-                Spacer(minLength: 0)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                detailBadge(
-                    provider.rawValue,
-                    systemImage: providerSystemImage,
-                    tint: workflowSectionTint(selectedSection)
-                )
-
+            TotalRecGlassCluster(spacing: 14) {
                 HStack(spacing: 10) {
+                    detailBadge(
+                        provider.rawValue,
+                        systemImage: providerSystemImage,
+                        tint: workflowSectionTint(selectedSection)
+                    )
+
                     if provider == .openAI {
                         detailBadge(
                             isOpenAIKeyConfigured ? "API key configured" : "API key missing",
                             systemImage: isOpenAIKeyConfigured ? "checkmark.seal.fill" : "exclamationmark.triangle.fill",
-                            tint: isOpenAIKeyConfigured ? .green : .orange
+                            tint: isOpenAIKeyConfigured ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
                         )
                     } else if provider == .tscript {
                         detailBadge(
                             selectedTScriptModel?.displayName ?? "Model registry pending",
                             systemImage: selectedTScriptModel == nil ? "server.rack" : "square.stack.3d.up.fill",
-                            tint: selectedTScriptModel == nil ? .secondary : .green
+                            tint: selectedTScriptModel == nil ? TotalRecGlass.neutralTint : TotalRecGlass.successGreen
                         )
                     }
 
@@ -1106,9 +1380,58 @@ struct ContentView: View {
                             tint: .secondary
                         )
                     }
+
+                    Spacer(minLength: 0)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                detailBadge(
+                    provider.rawValue,
+                    systemImage: providerSystemImage,
+                    tint: workflowSectionTint(selectedSection)
+                )
+
+                TotalRecGlassCluster(spacing: 14) {
+                    HStack(spacing: 10) {
+                        if provider == .openAI {
+                            detailBadge(
+                                isOpenAIKeyConfigured ? "API key configured" : "API key missing",
+                                systemImage: isOpenAIKeyConfigured ? "checkmark.seal.fill" : "exclamationmark.triangle.fill",
+                                tint: isOpenAIKeyConfigured ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+                            )
+                        } else if provider == .tscript {
+                            detailBadge(
+                                selectedTScriptModel?.displayName ?? "Model registry pending",
+                                systemImage: selectedTScriptModel == nil ? "server.rack" : "square.stack.3d.up.fill",
+                                tint: selectedTScriptModel == nil ? TotalRecGlass.neutralTint : TotalRecGlass.successGreen
+                            )
+                        }
+
+                        if let activeSession = appModel.activeSession {
+                            detailBadge(
+                                activeSession.sourceDescription,
+                                systemImage: "square.stack.3d.up",
+                                tint: .secondary
+                            )
+                        }
+                    }
                 }
             }
         }
+    }
+
+    private var insightStopButton: some View {
+        Button {
+            appModel.stopInsightArtifactGeneration()
+        } label: {
+            Label(
+                appModel.isStoppingInsightArtifact ? "Stopping…" : "Stop",
+                systemImage: appModel.isStoppingInsightArtifact ? "hourglass" : "stop.fill"
+            )
+        }
+        .disabled(appModel.isStoppingInsightArtifact)
+        .totalRecGlassButton(tint: TotalRecGlass.recordingRed)
     }
 
     private var workspaceNavigation: some View {
@@ -1127,11 +1450,7 @@ struct ContentView: View {
             compactSectionNavigation(vertical: true)
         }
         .padding(4)
-        .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.gray.opacity(0.10), lineWidth: 1)
-        )
+        .totalRecStaticPanel(cornerRadius: 18, tint: ambientAccentTint)
     }
 
     private var transcriptStepNavigation: some View {
@@ -1140,11 +1459,7 @@ struct ContentView: View {
             compactTranscriptStepNavigation(vertical: true)
         }
         .padding(4)
-        .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.gray.opacity(0.10), lineWidth: 1)
-        )
+        .totalRecStaticPanel(cornerRadius: 18, tint: workflowSectionTint(.transcript))
     }
 
     private func compactSectionNavigation(vertical: Bool) -> some View {
@@ -1174,8 +1489,6 @@ struct ContentView: View {
     private func sectionNavigationButton(for section: WorkflowSection) -> some View {
         let isSelected = selectedSection == section
         let tint = workflowSectionTint(section)
-        let backgroundColor = isSelected ? tint.opacity(0.14) : Color.clear
-        let borderColor = isSelected ? tint.opacity(0.35) : Color.gray.opacity(0.10)
 
         return Button {
             selectedSection = section
@@ -1183,21 +1496,18 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Image(systemName: workflowSectionIcon(section))
                     .imageScale(.medium)
+                    .foregroundStyle(isSelected ? TotalRecGlass.accentForeground(tint) : .secondary)
                 Text(section.rawValue)
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
             }
-            .foregroundStyle(isSelected ? tint : .primary)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .center)
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(backgroundColor)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(borderColor, lineWidth: 1)
+            .totalRecStaticRoundedRect(
+                cornerRadius: 14,
+                tint: isSelected ? tint : nil
             )
         }
         .buttonStyle(.plain)
@@ -1206,8 +1516,6 @@ struct ContentView: View {
     private func transcriptStepNavigationButton(for step: TranscriptWorkspaceStep) -> some View {
         let isSelected = selectedTranscriptStep == step
         let tint = workflowSectionTint(.transcript)
-        let backgroundColor = isSelected ? tint.opacity(0.14) : Color.clear
-        let borderColor = isSelected ? tint.opacity(0.35) : Color.gray.opacity(0.10)
 
         return Button {
             selectedTranscriptStep = step
@@ -1215,21 +1523,18 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Image(systemName: transcriptStepIcon(step))
                     .imageScale(.medium)
+                    .foregroundStyle(isSelected ? TotalRecGlass.accentForeground(tint) : .secondary)
                 Text(step.rawValue)
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
             }
-            .foregroundStyle(isSelected ? tint : .primary)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .center)
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(backgroundColor)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(borderColor, lineWidth: 1)
+            .totalRecStaticRoundedRect(
+                cornerRadius: 14,
+                tint: isSelected ? tint : nil
             )
         }
         .buttonStyle(.plain)
@@ -1285,87 +1590,75 @@ struct ContentView: View {
     private func workflowSectionTint(_ section: WorkflowSection) -> Color {
         switch section {
         case .capture:
-            return appModel.isRecording ? .red : .blue
+            return appModel.isRecording ? TotalRecGlass.recordingRed : TotalRecGlass.captureBlue
         case .transcript:
-            return .indigo
+            return TotalRecGlass.transcriptViolet
         case .insights:
-            return .green
+            return TotalRecGlass.insightsGreen
         }
+    }
+
+    private var providerAccentTint: Color {
+        switch provider {
+        case .openAI:
+            return isOpenAIKeyConfigured ? TotalRecGlass.warningAmber : TotalRecGlass.recordingRed
+        case .tscript:
+            return selectedTScriptModel == nil ? TotalRecGlass.neutralTint : TotalRecGlass.transcriptViolet
+        case .appleOnDevice:
+            return Color(red: 0.28, green: 0.58, blue: 0.62)
+        case .appleCloud:
+            return Color(red: 0.30, green: 0.56, blue: 0.78)
+        }
+    }
+
+    private var ambientAccentTint: Color {
+        if appModel.isRecording {
+            return TotalRecGlass.recordingRed
+        }
+
+        switch provider {
+        case .openAI:
+            return isOpenAIKeyConfigured ? TotalRecGlass.warningAmber : TotalRecGlass.captureBlue
+        case .tscript:
+            return selectedTScriptModel == nil ? TotalRecGlass.neutralTint : TotalRecGlass.transcriptViolet
+        case .appleOnDevice:
+            return Color(red: 0.28, green: 0.58, blue: 0.62)
+        case .appleCloud:
+            return Color(red: 0.30, green: 0.56, blue: 0.78)
+        }
+    }
+
+    private var ambientSecondaryTint: Color {
+        if let stage = appModel.activeSession?.stage, stage.totalRecShowsLiveActivity {
+            return stage.totalRecStatusTint
+        }
+        return TotalRecGlass.neutralTint
     }
 
     private func sessionStageTitle(_ stage: SessionStage) -> String {
-        switch stage {
-        case .idle:
-            return "Idle"
-        case .preparingRecording:
-            return "Preparing"
-        case .recording:
-            return "Recording"
-        case .mixingDown:
-            return "Mixing"
-        case .importingAudio:
-            return "Importing"
-        case .readyToTranscribe:
-            return "Ready"
-        case .transcribing:
-            return "Transcribing"
-        case .generatingInsights:
-            return "Notes"
-        case .completed:
-            return "Complete"
-        case .failed:
-            return "Attention"
-        }
+        stage.totalRecStatusLabel
     }
 
     private func sessionStageIcon(_ stage: SessionStage) -> String {
-        switch stage {
-        case .idle:
-            return "circle"
-        case .preparingRecording:
-            return "record.circle.dotted"
-        case .recording:
-            return "record.circle.fill"
-        case .mixingDown:
-            return "slider.horizontal.3"
-        case .importingAudio:
-            return "square.and.arrow.down"
-        case .readyToTranscribe:
-            return "waveform"
-        case .transcribing:
-            return "text.badge.clock"
-        case .generatingInsights:
-            return "sparkles.rectangle.stack"
-        case .completed:
-            return "checkmark.circle"
-        case .failed:
-            return "exclamationmark.triangle.fill"
-        }
+        stage.totalRecStatusIcon
     }
 
     private func sessionStageTint(_ stage: SessionStage) -> Color {
-        switch stage {
-        case .recording:
-            return .red
-        case .failed:
-            return .orange
-        case .preparingRecording, .mixingDown, .importingAudio, .transcribing, .generatingInsights:
-            return .blue
-        case .readyToTranscribe, .completed:
-            return .green
-        case .idle:
-            return .secondary
-        }
+        stage.totalRecStatusTint
     }
 
     private func detailBadge(_ title: String, systemImage: String, tint: Color) -> some View {
-        Label(title, systemImage: systemImage)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(tint.opacity(0.10), in: Capsule())
-            .foregroundStyle(tint)
-            .lineLimit(1)
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .foregroundStyle(TotalRecGlass.accentForeground(tint))
+            Text(title)
+                .foregroundStyle(.primary)
+        }
+        .font(.caption.weight(.semibold))
+        .lineLimit(1)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .totalRecGlassPill(tint: tint)
     }
 
     private func statusBanner(
@@ -1376,27 +1669,23 @@ struct ContentView: View {
     ) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: systemImage)
-                .foregroundStyle(tint)
+                .foregroundStyle(TotalRecGlass.accentForeground(tint))
                 .padding(.top, 2)
 
             Text(message)
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.primary)
 
             Spacer()
 
             if let dismissAction {
                 Button("Dismiss", action: dismissAction)
-                    .buttonStyle(.borderless)
+                    .totalRecGlassButton()
                     .font(.caption)
             }
         }
         .padding(12)
-        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(tint.opacity(0.20), lineWidth: 1)
-        )
+        .totalRecStaticRoundedRect(cornerRadius: 12, tint: tint)
     }
 
     private func pageCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -1405,11 +1694,7 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.gray.opacity(0.12), lineWidth: 1)
-        )
+        .totalRecStaticPanel(cornerRadius: 18)
     }
 
     private func sectionScrollContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -1470,11 +1755,7 @@ struct ContentView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
-        .background(item.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(item.tint.opacity(0.16), lineWidth: 1)
-        )
+        .totalRecStaticRoundedRect(cornerRadius: 14, tint: item.tint)
     }
 
     private var sessionDiagnosticsCard: some View {
@@ -1492,7 +1773,7 @@ struct ContentView: View {
                     statusBanner(
                         error,
                         systemImage: "exclamationmark.triangle.fill",
-                        tint: .orange
+                        tint: TotalRecGlass.warningAmber
                     )
                 }
 
@@ -1532,16 +1813,17 @@ struct ContentView: View {
         description: String,
         systemImage: String,
         tint: Color,
-        detail: String? = nil
+        detail: String? = nil,
+        detailSystemImage: String = "sparkles",
+        detailTint: Color? = nil
     ) -> some View {
         HStack(alignment: .top, spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(tint.opacity(0.12))
-                    .frame(width: 40, height: 40)
                 Image(systemName: systemImage)
                     .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(tint)
+                    .foregroundStyle(TotalRecGlass.accentForeground(tint))
+                    .frame(width: 40, height: 40)
+                    .totalRecStaticRoundedRect(cornerRadius: 14, tint: tint)
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -1555,23 +1837,12 @@ struct ContentView: View {
             Spacer(minLength: 12)
 
             if let detail {
-                detailBadge(detail, systemImage: "sparkles", tint: tint)
+                detailBadge(detail, systemImage: detailSystemImage, tint: detailTint ?? tint)
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            LinearGradient(
-                colors: [tint.opacity(0.12), tint.opacity(0.03)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(tint.opacity(0.16), lineWidth: 1)
-        )
+        .totalRecStaticPanel(cornerRadius: 18, tint: tint)
     }
 
     private var captureSection: some View {
@@ -1606,7 +1877,7 @@ struct ContentView: View {
                     statusBanner(
                         "Recording continues even if you close the main window. Use the explicit stop action here or from the menu bar.",
                         systemImage: "shield.lefthalf.filled",
-                        tint: .blue
+                        tint: TotalRecGlass.captureBlue
                     )
                 }
 
@@ -1631,21 +1902,12 @@ struct ContentView: View {
 
             if hasTranscriptDisplayText {
                 pageCard {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Latest Transcript Preview")
-                                .font(.headline)
-                            Text("Jump back into transcript review without losing the current capture context.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Spacer()
-
-                        Button("Open Transcript Tools") {
-                            selectedSection = .transcript
-                        }
-                        .buttonStyle(.bordered)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Latest Transcript Preview")
+                            .font(.headline)
+                        Text("Use the main workflow navigation to continue transcript review without losing the current capture context.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
 
                     ScrollView {
@@ -1653,8 +1915,7 @@ struct ContentView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                             .padding(10)
-                            .background(Color.gray.opacity(0.07))
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .totalRecReadableInset(cornerRadius: 14)
                     }
                     .frame(minHeight: 140, maxHeight: 240)
                 }
@@ -1690,16 +1951,25 @@ struct ContentView: View {
 
     private var captureButtons: some View {
         Group {
-            Button("Save Audio…", action: saveAudio)
+            Button(action: saveAudio) {
+                Label("Save Audio…", systemImage: "square.and.arrow.down")
+            }
+                .totalRecGlassButton()
                 .disabled(appModel.audioURL == nil)
 
-            Button("Save Transcript…", action: saveTranscript)
-            .disabled(appModel.transcriptState.isEmpty)
-
-            Button("Go to Transcript") {
-                selectedSection = .transcript
+            Button {
+                copyTranscriptAsMarkdown()
+            } label: {
+                Label("Copy Transcript", systemImage: "doc.on.doc")
             }
-            .disabled(appModel.audioURL == nil)
+            .totalRecGlassButton()
+            .disabled(!appModel.transcriptState.hasDisplayText)
+
+            Button(action: saveTranscript) {
+                Label("Save Transcript…", systemImage: "square.and.arrow.down")
+            }
+                .totalRecGlassButton()
+                .disabled(appModel.transcriptState.isEmpty)
         }
     }
 
@@ -1724,7 +1994,22 @@ struct ContentView: View {
 
     @ViewBuilder
     private var transcriptStepContent: some View {
-        switch selectedTranscriptStep {
+        ZStack(alignment: .topLeading) {
+            ForEach(TranscriptWorkspaceStep.allCases) { step in
+                if loadedTranscriptSteps.contains(step) {
+                    transcriptStepView(for: step)
+                        .opacity(selectedTranscriptStep == step ? 1 : 0)
+                        .allowsHitTesting(selectedTranscriptStep == step)
+                        .accessibilityHidden(selectedTranscriptStep != step)
+                        .zIndex(selectedTranscriptStep == step ? 1 : 0)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func transcriptStepView(for step: TranscriptWorkspaceStep) -> some View {
+        switch step {
         case .run:
             transcriptRunStepContent
         case .transcript:
@@ -1764,23 +2049,33 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
 
                 HStack(spacing: 8) {
-                    Button(appModel.isTranscribing ? "Transcribing…" : (hasTranscriptDisplayText ? "Re-run Transcription" : "Transcribe Audio")) {
+                    Button {
                         transcribe()
+                    } label: {
+                        if appModel.isTranscribing {
+                            HStack(spacing: 8) {
+                                TotalRecActivitySymbol(
+                                    systemImage: SessionStage.transcribing.totalRecMenuBarIconName,
+                                    tint: SessionStage.transcribing.totalRecStatusTint,
+                                    motion: SessionStage.transcribing.totalRecActivityMotion,
+                                    size: 12,
+                                    weight: .bold
+                                )
+                                Text("Transcribing…")
+                            }
+                        } else {
+                            Text(hasTranscriptDisplayText ? "Re-run Transcription" : "Transcribe Audio")
+                        }
                     }
                     .disabled(isTranscriptionActionDisabled)
-                    .buttonStyle(.borderedProminent)
-
-                    Button("Go to Capture") {
-                        selectedSection = .capture
-                    }
-                    .buttonStyle(.bordered)
+                    .totalRecGlassButton(prominent: true)
                 }
 
                 if hasTranscriptDisplayText {
                     statusBanner(
                         "A new transcription run replaces the current transcript result for this session.",
                         systemImage: "arrow.clockwise.circle",
-                        tint: .blue
+                        tint: TotalRecGlass.captureBlue
                     )
                 }
 
@@ -1791,8 +2086,7 @@ struct ContentView: View {
                         Text(appModel.processingPreviewText)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(10)
-                            .background(Color.gray.opacity(0.07))
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .totalRecReadableInset(cornerRadius: 14)
                     }
                 }
             }
@@ -1825,7 +2119,7 @@ struct ContentView: View {
                     audioDuration: appModel.mixedAudioDuration,
                     suggestionService: nameSuggestionService,
                     areSuggestionsEnabled: BuildFeatures.nameSuggestionsEnabled && nameSuggestionProvider != .disabled,
-                    suggestionProviderName: nameSuggestionProvider.displayName,
+                    suggestionProviderName: nameSuggestionProviderSummary,
                     onStatusMessage: { message in
                         appModel.setStatusMessage(message)
                     }
@@ -1885,7 +2179,7 @@ struct ContentView: View {
                         Button(provider == .openAI ? "Manage API Key" : "Manage Server") {
                             showSettingsSheet = true
                         }
-                        .buttonStyle(.bordered)
+                        .totalRecGlassButton()
                     }
                 }
 
@@ -1914,46 +2208,48 @@ struct ContentView: View {
     private var openAITranscriptionSettings: some View {
         VStack(alignment: .leading, spacing: 12) {
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    detailBadge(
-                        isOpenAIKeyConfigured ? "API key ready" : "API key required",
-                        systemImage: isOpenAIKeyConfigured ? "key.fill" : "exclamationmark.triangle.fill",
-                        tint: isOpenAIKeyConfigured ? .green : .orange
-                    )
+                TotalRecGlassCluster(spacing: 14) {
+                    HStack(spacing: 8) {
+                        detailBadge(
+                            isOpenAIKeyConfigured ? "API key ready" : "API key required",
+                            systemImage: isOpenAIKeyConfigured ? "key.fill" : "exclamationmark.triangle.fill",
+                            tint: isOpenAIKeyConfigured ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+                        )
 
-                    detailBadge(
-                        openAIChunkingDisplayName,
-                        systemImage: openAIChunkingStrategy == "none" ? "arrow.up.doc" : "square.split.2x2",
-                        tint: .blue
-                    )
+                        detailBadge(
+                            openAIChunkingDisplayName,
+                            systemImage: openAIChunkingStrategy == "none" ? "arrow.up.doc" : "square.split.2x2",
+                            tint: TotalRecGlass.captureBlue
+                        )
 
-                    detailBadge(
-                        knownSpeakerHintCount == 0 ? "No speaker hints" : "\(knownSpeakerHintCount) speaker hints",
-                        systemImage: "person.2.fill",
-                        tint: knownSpeakerHintCount == 0 ? .secondary : .indigo
-                    )
+                        detailBadge(
+                            knownSpeakerHintCount == 0 ? "No speaker hints" : "\(knownSpeakerHintCount) speaker hints",
+                            systemImage: "person.2.fill",
+                            tint: knownSpeakerHintCount == 0 ? TotalRecGlass.neutralTint : TotalRecGlass.transcriptViolet
+                        )
 
-                    Spacer(minLength: 0)
+                        Spacer(minLength: 0)
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
                     detailBadge(
                         isOpenAIKeyConfigured ? "API key ready" : "API key required",
                         systemImage: isOpenAIKeyConfigured ? "key.fill" : "exclamationmark.triangle.fill",
-                        tint: isOpenAIKeyConfigured ? .green : .orange
+                        tint: isOpenAIKeyConfigured ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
                     )
 
                     HStack(spacing: 8) {
                         detailBadge(
                             openAIChunkingDisplayName,
                             systemImage: openAIChunkingStrategy == "none" ? "arrow.up.doc" : "square.split.2x2",
-                            tint: .blue
+                            tint: TotalRecGlass.captureBlue
                         )
 
                         detailBadge(
                             knownSpeakerHintCount == 0 ? "No speaker hints" : "\(knownSpeakerHintCount) speaker hints",
                             systemImage: "person.2.fill",
-                            tint: knownSpeakerHintCount == 0 ? .secondary : .indigo
+                            tint: knownSpeakerHintCount == 0 ? TotalRecGlass.neutralTint : TotalRecGlass.transcriptViolet
                         )
                     }
                 }
@@ -1962,7 +2258,7 @@ struct ContentView: View {
             if !isOpenAIKeyConfigured {
                 HStack(alignment: .center, spacing: 10) {
                     Image(systemName: "key.fill")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.warningAmber))
 
                     Text("OpenAI transcription requires an API key stored in Keychain. Use Settings to add or replace it.")
                         .font(.footnote)
@@ -1973,14 +2269,10 @@ struct ContentView: View {
                     Button("Open Settings") {
                         showSettingsSheet = true
                     }
-                    .buttonStyle(.bordered)
+                    .totalRecGlassButton()
                 }
                 .padding(12)
-                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.orange.opacity(0.22), lineWidth: 1)
-                )
+                .totalRecGlassRoundedRect(cornerRadius: 12, tint: TotalRecGlass.warningAmber)
             } else {
                 Text("OpenAI key is configured and available for diarized transcription.")
                     .font(.caption)
@@ -2035,6 +2327,7 @@ struct ContentView: View {
                             knownSpeakerRefsInputs = Array(repeating: "", count: 4)
                         }
                         .font(.caption)
+                        .totalRecGlassButton()
                     }
                 }
                 .padding(.top, 8)
@@ -2053,7 +2346,7 @@ struct ContentView: View {
                 statusBanner(
                     "Each speaker hint row needs both a name and a reference. Incomplete rows are ignored until you finish or clear them.",
                     systemImage: "person.crop.rectangle.stack.fill",
-                    tint: .orange
+                    tint: TotalRecGlass.warningAmber
                 )
             }
         }
@@ -2063,30 +2356,32 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             let transportItem = tScriptTransportReadinessItem
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    detailBadge(
-                        transportItem.title,
-                        systemImage: transportItem.systemImage,
-                        tint: transportItem.tint
-                    )
-
-                    if let model = selectedTScriptModel {
+                TotalRecGlassCluster(spacing: 14) {
+                    HStack(spacing: 8) {
                         detailBadge(
-                            model.displayName,
-                            systemImage: "square.stack.3d.up.fill",
-                            tint: model.runtimeAvailable ? .green : .orange
+                            transportItem.title,
+                            systemImage: transportItem.systemImage,
+                            tint: transportItem.tint
                         )
-                    }
 
-                    if isTScriptModelsLoading {
-                        detailBadge(
-                            "Refreshing models",
-                            systemImage: "arrow.triangle.2.circlepath",
-                            tint: .blue
-                        )
-                    }
+                        if let model = selectedTScriptModel {
+                            detailBadge(
+                                model.displayName,
+                                systemImage: "square.stack.3d.up.fill",
+                                tint: model.runtimeAvailable ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+                            )
+                        }
 
-                    Spacer(minLength: 0)
+                        if isTScriptModelsLoading {
+                            detailBadge(
+                                "Refreshing models",
+                                systemImage: "arrow.triangle.2.circlepath",
+                                tint: TotalRecGlass.captureBlue
+                            )
+                        }
+
+                        Spacer(minLength: 0)
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -2101,7 +2396,7 @@ struct ContentView: View {
                             detailBadge(
                                 model.displayName,
                                 systemImage: "square.stack.3d.up.fill",
-                                tint: model.runtimeAvailable ? .green : .orange
+                                tint: model.runtimeAvailable ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
                             )
                         }
 
@@ -2109,7 +2404,7 @@ struct ContentView: View {
                             detailBadge(
                                 "Refreshing models",
                                 systemImage: "arrow.triangle.2.circlepath",
-                                tint: .blue
+                                tint: TotalRecGlass.captureBlue
                             )
                         }
                     }
@@ -2119,7 +2414,7 @@ struct ContentView: View {
             if !tScriptBaseURLConfigured {
                 HStack(alignment: .center, spacing: 10) {
                     Image(systemName: "server.rack")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.warningAmber))
 
                     Text("TScript transcription requires a server base URL in Settings before the app can discover models.")
                         .font(.footnote)
@@ -2130,14 +2425,10 @@ struct ContentView: View {
                     Button("Open Settings") {
                         showSettingsSheet = true
                     }
-                    .buttonStyle(.bordered)
+                    .totalRecGlassButton()
                 }
                 .padding(12)
-                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.orange.opacity(0.22), lineWidth: 1)
-                )
+                .totalRecGlassRoundedRect(cornerRadius: 12, tint: TotalRecGlass.warningAmber)
             } else {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -2153,7 +2444,7 @@ struct ContentView: View {
                     Button(isTScriptModelsLoading ? "Refreshing…" : "Refresh Models") {
                         refreshTScriptModels()
                     }
-                    .buttonStyle(.bordered)
+                    .totalRecGlassButton()
                     .disabled(isTScriptModelsLoading)
                 }
             }
@@ -2162,7 +2453,7 @@ struct ContentView: View {
                 statusBanner(
                     warning,
                     systemImage: "exclamationmark.shield.fill",
-                    tint: .orange
+                    tint: TotalRecGlass.warningAmber
                 )
             }
 
@@ -2170,7 +2461,7 @@ struct ContentView: View {
                 statusBanner(
                     error,
                     systemImage: "exclamationmark.triangle.fill",
-                    tint: .orange
+                    tint: TotalRecGlass.warningAmber
                 )
             }
 
@@ -2383,88 +2674,122 @@ struct ContentView: View {
     private var insightsSection: some View {
         sectionScrollContainer {
             workspaceHero(
-                title: appModel.meetingNotes.isEmpty ? "Generate structured notes" : "Insights and meeting notes",
-                description: "Turn the transcript into reusable notes, action items, and shareable summaries.",
+                title: appModel.insightArtifact == nil ? "Generate transcript artifacts" : "Insights and artifacts",
+                description: "Turn the transcript into reusable summaries, decision logs, action lists, and other workflow-specific outputs.",
                 systemImage: "list.bullet.rectangle.portrait",
                 tint: workflowSectionTint(.insights),
-                detail: hasTranscriptDisplayText ? "Transcript ready" : nil
+                detail: hasTranscriptDisplayText ? "Transcript ready" : "Transcript required",
+                detailSystemImage: hasTranscriptDisplayText ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
+                detailTint: hasTranscriptDisplayText ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
             )
 
             readinessCard(
                 title: "Insights readiness",
-                subtitle: "Check transcript access, OpenAI availability, and prompt state before generating notes.",
+                subtitle: "Check transcript access, provider availability, and workflow state before generating an artifact.",
                 items: insightsReadinessItems
             )
 
             pageCard {
-                meetingNotesPanel
+                insightsPanel
 
                 HStack(spacing: 8) {
-                    Button("Save Notes (Text)") {
-                        saveMeetingNotes(as: .plainText)
+                    Button {
+                        copyInsightArtifactToClipboard()
+                    } label: {
+                        Label("Copy Artifact", systemImage: "doc.on.doc")
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(appModel.meetingNotes.isEmpty)
+                    .totalRecGlassButton()
+                    .disabled(appModel.insightArtifact == nil)
 
-                    Button("Save Notes (JSON)") {
-                        saveMeetingNotes(as: .json)
+                    Button {
+                        saveInsightArtifact()
+                    } label: {
+                        Label("Save Artifact…", systemImage: "square.and.arrow.down")
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(appModel.meetingNotes.isEmpty)
+                    .totalRecGlassButton()
+                    .disabled(appModel.insightArtifact == nil)
                 }
             }
         }
     }
 
-    private var meetingNotesPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
+    private var insightsPanel: some View {
+            VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Meeting Notes")
+                    Text("Insight Workflow")
                         .font(.headline)
-                    Text("Generate a structured readout from the current session transcript.")
+                    Text("Generate a transcript-derived artifact for the current audio session.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if appModel.isGeneratingMeetingNotes {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                }
-                Button("Generate Meeting Notes") {
-                    Task {
-                        let trimmedPrompt = customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let promptOverride = useCustomInsightsPrompt
-                            ? trimmedPrompt
-                            : selectedInsightsPreset.promptTemplate
-                        if useCustomInsightsPrompt && trimmedPrompt.isEmpty {
-                            appModel.meetingNotesError = "Enter a custom prompt or disable the option."
-                            appModel.setStatusMessage("Meeting notes failed: Custom prompt required.")
-                            return
-                        }
-                        do {
-                            try await appModel.generateMeetingNotes(promptOverride: promptOverride)
-                        } catch {
-                            // AppModel already surfaced the failure state.
-                        }
+                if appModel.isGeneratingInsightArtifact {
+                    Button {
+                        appModel.stopInsightArtifactGeneration()
+                    } label: {
+                        Label(
+                            appModel.isStoppingInsightArtifact ? "Stopping…" : "Stop",
+                            systemImage: appModel.isStoppingInsightArtifact ? "hourglass" : "stop.fill"
+                        )
                     }
+                    .disabled(appModel.isStoppingInsightArtifact)
+                    .totalRecGlassButton(tint: TotalRecGlass.recordingRed)
+                } else {
+                    Button {
+                        runInsightsGeneration()
+                    } label: {
+                        Text("Generate Artifact")
+                    }
+                    .disabled(isInsightActionDisabled)
+                    .totalRecGlassButton(prominent: true)
                 }
-                .disabled(isMeetingNotesActionDisabled)
-                .buttonStyle(.borderedProminent)
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    detailBadge(
+                        defaultInsightProvider.displayName,
+                        systemImage: "cpu",
+                        tint: workflowSectionTint(.insights)
+                    )
+
+                    detailBadge(
+                        displayName(for: resolvedInsightModelID, provider: defaultInsightProvider),
+                        systemImage: "square.stack.3d.up",
+                        tint: TotalRecGlass.transcriptViolet
+                    )
+
+                    Spacer(minLength: 0)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    detailBadge(
+                        defaultInsightProvider.displayName,
+                        systemImage: "cpu",
+                        tint: workflowSectionTint(.insights)
+                    )
+
+                    detailBadge(
+                        displayName(for: resolvedInsightModelID, provider: defaultInsightProvider),
+                        systemImage: "square.stack.3d.up",
+                        tint: TotalRecGlass.transcriptViolet
+                    )
+                }
             }
 
             VStack(alignment: .leading, spacing: 8) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Notes Preset")
+                    Text("Workflow")
                         .font(.subheadline.weight(.semibold))
-                    Picker("Notes Preset", selection: $selectedInsightsPreset) {
-                        ForEach(MeetingNotesService.Preset.allCases) { preset in
-                            Text(preset.rawValue).tag(preset)
+                    Picker("Workflow", selection: $selectedInsightWorkflow) {
+                        ForEach(InsightWorkflow.allCases) { workflow in
+                            Text(workflow.displayName).tag(workflow)
                         }
                     }
                     .pickerStyle(.menu)
 
-                    Text(selectedInsightsPreset.description)
+                    Text(selectedInsightWorkflow.description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -2473,7 +2798,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Customize Prompt")
                             .font(.subheadline)
-                        Text("Use a preset as the default, or switch this on to fully control the GPT-5 instructions. Keep the {{TRANSCRIPT}} token where the diarized text should be inserted.")
+                        Text("Use the selected workflow template as the default, or switch this on to fully control the LLM instructions. Keep the {{TRANSCRIPT}} token where the diarized text should be inserted.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -2497,39 +2822,132 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                         Button("Reset to template") {
-                            customInsightsPrompt = selectedInsightsPreset.promptTemplate
+                            customInsightsPrompt = selectedInsightWorkflow.promptTemplate
                         }
                         .font(.caption)
                     }
                 } else {
-                    Text("Using the \(selectedInsightsPreset.rawValue.lowercased()) preset.")
+                    Text("Using the \(selectedInsightWorkflow.displayName.lowercased()) workflow template.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            if let error = appModel.meetingNotesError, !error.isEmpty {
+            if let error = appModel.insightRunError, !error.isEmpty {
                 Text(error)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.recordingRed))
                     .font(.footnote)
             }
 
-            if appModel.meetingNotes.isEmpty {
-                Text("No meeting notes yet. Generate notes to see a structured summary of this meeting.")
+            if appModel.isGeneratingInsightArtifact || !appModel.insightStreamingText.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Label("Live Output", systemImage: "text.append")
+                            .font(.subheadline.weight(.semibold))
+                        if appModel.isGeneratingInsightArtifact {
+                            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                                if let elapsed = appModel.insightRunElapsedText {
+                                    Text(elapsed)
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        } else if appModel.insightArtifact != nil {
+                            Text("Unsaved partial output")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.warningAmber))
+                        }
+                    }
+
+                    artifactPreview(
+                        title: appModel.isGeneratingInsightArtifact ? "Streaming artifact" : "Partial run output",
+                        subtitle: appModel.isGeneratingInsightArtifact
+                            ? "The new artifact is streaming in now. The saved artifact remains unchanged until this run completes."
+                            : "This output was not saved because the last run did not complete.",
+                        content: appModel.insightStreamingText
+                    )
+                }
+            }
+
+            if appModel.isGeneratingInsightArtifact, let insightArtifact = appModel.insightArtifact {
+                artifactPreview(
+                    title: "Last saved artifact",
+                    subtitle: "\(insightArtifact.workflow.displayName) from \(insightArtifact.generatedAt.formatted(date: .abbreviated, time: .shortened))",
+                    content: insightArtifact.content
+                )
+            } else if let insightArtifact = appModel.insightArtifact {
+                artifactPreview(
+                    title: insightArtifact.title,
+                    subtitle: artifactMetadataSummary(for: insightArtifact),
+                    content: insightArtifact.content
+                )
+            } else if appModel.insightStreamingText.isEmpty {
+                Text("No insight artifact yet. Generate one to see a workflow-specific summary of this transcript.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-            } else {
-                ScrollView {
-                    Text(appModel.meetingNotes)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(12)
-                        .background(Color.gray.opacity(0.07))
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .frame(minHeight: 180)
             }
         }
+    }
+
+    private func artifactPreview(title: String, subtitle: String, content: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ScrollView {
+                Text(content)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(12)
+                    .background(Color.gray.opacity(0.07))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .frame(minHeight: 180)
+        }
+    }
+
+    private func artifactMetadataSummary(for artifact: InsightArtifact) -> String {
+        "\(artifact.workflow.displayName) • \(artifact.generatedAt.formatted(date: .abbreviated, time: .shortened)) • \(artifact.provider.displayName) • \(artifact.modelID)"
+    }
+
+    private func runInsightsGeneration() {
+        let trimmedPrompt = customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if useCustomInsightsPrompt && trimmedPrompt.isEmpty {
+            appModel.insightRunError = "Enter a custom prompt or disable the custom prompt override."
+            appModel.setStatusMessage("Insight generation failed: Custom prompt required.")
+            return
+        }
+
+        if !isAPIKeyConfigured(for: defaultInsightProvider) {
+            appModel.insightRunError = "\(defaultInsightProvider.displayName) API key missing."
+            appModel.setStatusMessage("Insight generation failed: \(defaultInsightProvider.displayName) API key missing.")
+            showSettingsSheet = true
+            return
+        }
+
+        persistInsightEditorState()
+
+        appModel.startInsightArtifactGeneration()
+    }
+
+    private func syncInsightEditorState(from settings: InsightSettings?) {
+        let resolved = settings ?? InsightSettings(selectedWorkflow: defaultInsightWorkflow)
+        selectedInsightWorkflow = resolved.selectedWorkflow
+        useCustomInsightsPrompt = resolved.useCustomPrompt
+        customInsightsPrompt = resolved.customPrompt
+    }
+
+    private func persistInsightEditorState() {
+        guard appModel.activeSession != nil else { return }
+        appModel.updateInsightSettings(
+            InsightSettings(
+                selectedWorkflow: selectedInsightWorkflow,
+                useCustomPrompt: useCustomInsightsPrompt,
+                customPrompt: customInsightsPrompt
+            )
+        )
     }
 
     private func transcribe() {
@@ -2627,6 +3045,79 @@ struct ContentView: View {
         }
     }
 
+    private func handleTScriptConfigurationChange(oldValue: TScriptConfiguration, newValue: TScriptConfiguration) {
+        do {
+            try AIConfigManager.shared.updateTScriptConfiguration(newValue)
+        } catch {
+            appModel.setStatusMessage("Failed to save TScript settings: \(error.localizedDescription)")
+        }
+
+        let oldBaseURL = oldValue.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newBaseURL = newValue.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if oldBaseURL != newBaseURL {
+            tScriptModelsResponse = nil
+            tScriptModelsError = nil
+        }
+    }
+
+    private func refreshLLMModels(for provider: LLMProvider) {
+        switch provider {
+        case .openAI:
+            guard isOpenAIKeyConfigured else {
+                openAIModelsError = "Add an OpenAI API key in Settings before loading models."
+                return
+            }
+            guard !isOpenAIModelsLoading else { return }
+            isOpenAIModelsLoading = true
+            openAIModelsError = nil
+        case .sambaNova:
+            guard isSambaNovaKeyConfigured else {
+                sambaNovaModelsError = "Add a SambaNova API key in Settings before loading models."
+                return
+            }
+            guard !isSambaNovaModelsLoading else { return }
+            isSambaNovaModelsLoading = true
+            sambaNovaModelsError = nil
+        }
+
+        Task {
+            do {
+                let models = try await llmModelCatalogService.fetchModels(for: provider)
+                try AIConfigManager.shared.updateCachedModels(models, for: provider)
+                let config = AIConfigManager.shared.configuration
+
+                await MainActor.run {
+                    switch provider {
+                    case .openAI:
+                        isOpenAIModelsLoading = false
+                        openAIModels = config.openAI.cachedModels
+                        openAIModelsUpdatedAt = config.openAI.modelsUpdatedAt
+                        openAIModelsError = nil
+                    case .sambaNova:
+                        isSambaNovaModelsLoading = false
+                        sambaNovaModels = config.sambaNova.cachedModels
+                        sambaNovaModelsUpdatedAt = config.sambaNova.modelsUpdatedAt
+                        sambaNovaModelsError = nil
+                    }
+
+                    defaultInsightModelID = config.defaultInsightModelID
+                    nameSuggestionModelID = config.nameSuggestionModelID
+                }
+            } catch {
+                await MainActor.run {
+                    switch provider {
+                    case .openAI:
+                        isOpenAIModelsLoading = false
+                        openAIModelsError = error.localizedDescription
+                    case .sambaNova:
+                        isSambaNovaModelsLoading = false
+                        sambaNovaModelsError = error.localizedDescription
+                    }
+                }
+            }
+        }
+    }
+
     private func normalizeTScriptSelection(using response: TScriptModelsResponse) {
         let configuredID = tScriptConfiguration.selectedModelID.trimmingCharacters(in: .whitespacesAndNewlines)
         let availableModelIDs = response.allModels.filter(\.runtimeAvailable).map(\.id)
@@ -2712,12 +3203,21 @@ struct ContentView: View {
 
     private func copyTranscriptAsMarkdown() {
         guard appModel.transcriptState.hasDisplayText else { return }
-#if os(macOS)
         let markdown = TranscriptRenderer(transcript: appModel.transcriptState).markdown()
+        copyStringToClipboard(markdown, successMessage: "Transcript copied to clipboard.")
+    }
+
+    private func copyInsightArtifactToClipboard() {
+        guard let artifact = appModel.insightArtifact, artifact.hasContent else { return }
+        copyStringToClipboard(artifact.content, successMessage: "Artifact copied to clipboard.")
+    }
+
+    private func copyStringToClipboard(_ string: String, successMessage: String) {
+#if os(macOS)
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(markdown, forType: .string)
-        appModel.setStatusMessage("Transcript copied as Markdown.")
+        pasteboard.setString(string, forType: .string)
+        appModel.setStatusMessage(successMessage)
 #endif
     }
 
@@ -2745,54 +3245,54 @@ struct ContentView: View {
         }
     }
 
-    private enum MeetingNotesExportFormat {
-        case plainText
-        case json
-
-        var contentType: UTType {
-            switch self {
-            case .plainText:
-                return .plainText
-            case .json:
-                return .json
-            }
-        }
-
-        var fileName: String {
-            switch self {
-            case .plainText:
-                return "notes.txt"
-            case .json:
-                return "notes.json"
-            }
-        }
-    }
-
-    private func saveMeetingNotes(as format: MeetingNotesExportFormat) {
-        guard !appModel.meetingNotes.isEmpty else { return }
+    private func saveInsightArtifact() {
+        guard let artifact = appModel.insightArtifact, artifact.hasContent else { return }
 #if os(macOS)
+        let availableFormats = InsightArtifactExportFormat.allCases
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [format.contentType]
-        panel.nameFieldStringValue = format.fileName
+        let coordinator = InsightArtifactSavePanelCoordinator(
+            panel: panel,
+            formats: availableFormats,
+            artifact: artifact
+        )
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
+        panel.title = "Save Artifact"
+        panel.prompt = "Save"
+        panel.showsTagField = false
+        panel.allowedContentTypes = availableFormats.map(\.contentType)
+        panel.delegate = coordinator
+        if #available(macOS 15.0, *) {
+            panel.showsContentTypes = availableFormats.count > 1
+            panel.currentContentType = availableFormats[0].contentType
+        }
+        panel.nameFieldStringValue = availableFormats[0].suggestedFilename(for: artifact)
         panel.begin { response in
             if response == .OK, let destination = panel.url {
                 do {
-                    switch format {
-                    case .plainText:
-                        try appModel.meetingNotes.write(to: destination, atomically: true, encoding: .utf8)
-                    case .json:
-                        let payload = ["notes": appModel.meetingNotes]
-                        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted])
-                        try data.write(to: destination)
-                    }
+                    try writeInsightArtifact(artifact, to: destination, format: coordinator.selectedFormat)
                 } catch {
                     appModel.setStatusMessage("Save failed: \(error.localizedDescription)")
                 }
             }
         }
 #endif
+    }
+
+    private func writeInsightArtifact(
+        _ artifact: InsightArtifact,
+        to destination: URL,
+        format: InsightArtifactExportFormat
+    ) throws {
+        switch format {
+        case .plainText:
+            try artifact.content.write(to: destination, atomically: true, encoding: .utf8)
+        case .json:
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(artifact)
+            try data.write(to: destination)
+        }
     }
 
     private func importAudioFromFileSystem() {
@@ -2873,7 +3373,7 @@ private struct SessionSidebarView: View {
     let onClearWorkspace: () -> Void
 
     private var captureTint: Color {
-        appModel.isRecording ? .red : .blue
+        appModel.isRecording ? TotalRecGlass.recordingRed : TotalRecGlass.captureBlue
     }
 
     var body: some View {
@@ -2890,14 +3390,14 @@ private struct SessionSidebarView: View {
                         .font(.caption.weight(.semibold))
                 }
                 .controlSize(.small)
-                .buttonStyle(.bordered)
+                .totalRecGlassButton()
                 .disabled(appModel.activeSession == nil || appModel.hasProtectedActivity)
 
                 Text("\(appModel.recentSessionSummaries.count)")
                     .font(.caption.weight(.semibold))
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
-                    .background(Color.gray.opacity(0.10), in: Capsule())
+                    .totalRecGlassPill()
             }
 
             Text("Each recording or import becomes its own session. Protected work keeps the current session in place until it is safe to switch.")
@@ -2922,12 +3422,7 @@ private struct SessionSidebarView: View {
                 }
                 .frame(maxWidth: .infinity, minHeight: 220)
                 .padding(18)
-                .background(captureTint.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [6, 6]))
-                        .foregroundStyle(Color.gray.opacity(0.25))
-                )
+                .totalRecGlassPanel(cornerRadius: 18, tint: captureTint)
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
@@ -2950,11 +3445,7 @@ private struct SessionSidebarView: View {
         }
         .padding(16)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(Color.gray.opacity(0.12), lineWidth: 1)
-        )
+        .totalRecGlassPanel(cornerRadius: 22)
     }
 
     private var sessionCaptureControlPanel: some View {
@@ -2977,26 +3468,23 @@ private struct SessionSidebarView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(captureTint.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(captureTint.opacity(0.16), lineWidth: 1)
-        )
+        .totalRecGlassRoundedRect(cornerRadius: 16, tint: captureTint)
         .opacity(selectedSection == .capture ? 1.0 : 0.68)
     }
 
     private var sessionCaptureButtons: some View {
         Group {
             Button(appModel.isRecording ? "Stop Recording" : "Start Recording", action: onToggleRecording)
-                .buttonStyle(.borderedProminent)
+                .totalRecGlassButton(prominent: true)
                 .keyboardShortcut(.space, modifiers: [])
 
             Button("Import Audio…", action: onImportAudio)
+                .totalRecGlassButton()
                 .disabled(appModel.isBusy)
 
             if appModel.activeSession != nil {
                 Button("Clear Workspace", action: onClearWorkspace)
-                    .buttonStyle(.bordered)
+                    .totalRecGlassButton()
                     .disabled(appModel.hasProtectedActivity)
             }
         }
@@ -3019,7 +3507,7 @@ private struct SessionSidebarView: View {
                         .font(.caption2.weight(.semibold))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(Color.accentColor.opacity(0.12), in: Capsule())
+                        .totalRecStaticPill(tint: .accentColor)
                 } else if isLocked {
                     Image(systemName: "lock.fill")
                         .font(.caption)
@@ -3044,8 +3532,8 @@ private struct SessionSidebarView: View {
                 if session.hasTranscript {
                     sessionMetaPill("Transcript", systemImage: "text.quote")
                 }
-                if session.hasMeetingNotes {
-                    sessionMetaPill("Notes", systemImage: "list.bullet.rectangle")
+                if session.hasInsightArtifact {
+                    sessionMetaPill("Insights", systemImage: "list.bullet.rectangle")
                 }
                 if session.lastError?.isEmpty == false {
                     sessionMetaPill("Issue", systemImage: "exclamationmark.triangle")
@@ -3058,17 +3546,7 @@ private struct SessionSidebarView: View {
         }
         .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(isActive ? Color.accentColor.opacity(0.10) : Color.white.opacity(0.001))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(
-                    isActive ? Color.accentColor.opacity(0.45) : Color.gray.opacity(0.18),
-                    lineWidth: 1
-                )
-        )
+        .totalRecStaticRoundedRect(cornerRadius: 12, tint: isActive ? .accentColor : nil)
         .opacity(isLocked ? 0.6 : 1.0)
         .contentShape(RoundedRectangle(cornerRadius: 12))
     }
@@ -3078,72 +3556,19 @@ private struct SessionSidebarView: View {
             .font(.caption2)
             .padding(.horizontal, 7)
             .padding(.vertical, 4)
-            .background(Color.gray.opacity(0.12), in: Capsule())
+            .totalRecStaticPill()
     }
 
     private func stageTitle(_ stage: SessionStage) -> String {
-        switch stage {
-        case .idle:
-            return "Idle"
-        case .preparingRecording:
-            return "Preparing"
-        case .recording:
-            return "Recording"
-        case .mixingDown:
-            return "Mixing"
-        case .importingAudio:
-            return "Importing"
-        case .readyToTranscribe:
-            return "Ready"
-        case .transcribing:
-            return "Transcribing"
-        case .generatingInsights:
-            return "Notes"
-        case .completed:
-            return "Complete"
-        case .failed:
-            return "Attention"
-        }
+        stage.totalRecStatusLabel
     }
 
     private func stageIcon(_ stage: SessionStage) -> String {
-        switch stage {
-        case .idle:
-            return "circle"
-        case .preparingRecording:
-            return "record.circle.dotted"
-        case .recording:
-            return "record.circle.fill"
-        case .mixingDown:
-            return "slider.horizontal.3"
-        case .importingAudio:
-            return "square.and.arrow.down"
-        case .readyToTranscribe:
-            return "waveform"
-        case .transcribing:
-            return "text.badge.clock"
-        case .generatingInsights:
-            return "sparkles.rectangle.stack"
-        case .completed:
-            return "checkmark.circle"
-        case .failed:
-            return "exclamationmark.triangle.fill"
-        }
+        stage.totalRecStatusIcon
     }
 
     private func stageTint(_ stage: SessionStage) -> Color {
-        switch stage {
-        case .recording:
-            return .red
-        case .failed:
-            return .orange
-        case .preparingRecording, .mixingDown, .importingAudio, .transcribing, .generatingInsights:
-            return .blue
-        case .readyToTranscribe, .completed:
-            return .green
-        case .idle:
-            return .secondary
-        }
+        stage.totalRecStatusTint
     }
 }
 
@@ -3152,12 +3577,31 @@ private struct SettingsSheetView: View {
     private static let apiKeyFieldWidth: CGFloat = 420
 
     @Binding var nameSuggestionProvider: NameSuggestionProvider
+    @Binding var defaultInsightWorkflow: InsightWorkflow
+    @Binding var defaultInsightProvider: LLMProvider
+    @Binding var defaultInsightModelID: String
+    @Binding var nameSuggestionModelID: String
     @Binding var openAIAPIKey: String
+    @Binding var sambaNovaAPIKey: String
+    @Binding var sambaNovaBaseURL: String
+    let openAIModels: [ProviderModelDescriptor]
+    let sambaNovaModels: [ProviderModelDescriptor]
+    let openAIModelsUpdatedAt: Date?
+    let sambaNovaModelsUpdatedAt: Date?
+    let isOpenAIModelsLoading: Bool
+    let isSambaNovaModelsLoading: Bool
+    let openAIModelsError: String?
+    let sambaNovaModelsError: String?
     @Binding var tScriptConfiguration: TScriptConfiguration
+    var onRefreshModels: (LLMProvider) -> Void
     var onClose: () -> Void
 
     private var hasOpenAIKey: Bool {
         !openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var hasSambaNovaKey: Bool {
+        !sambaNovaAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var hasTScriptBaseURL: Bool {
@@ -3191,16 +3635,85 @@ private struct SettingsSheetView: View {
         return nil
     }
 
+    private func providerModels(for provider: LLMProvider) -> [ProviderModelDescriptor] {
+        switch provider {
+        case .openAI:
+            return openAIModels
+        case .sambaNova:
+            return sambaNovaModels
+        }
+    }
+
+    private func effectiveModelChoices(
+        for provider: LLMProvider,
+        feature: LLMFeature,
+        selectedID: String
+    ) -> [ProviderModelDescriptor] {
+        let filtered = providerModels(for: provider).filter { $0.supports(feature: feature) }
+        let trimmed = selectedID.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmed.isEmpty {
+            if !filtered.isEmpty {
+                return filtered
+            }
+            return [
+                ProviderModelDescriptor(
+                    id: provider.defaultModelID(for: feature),
+                    displayName: provider.defaultModelID(for: feature),
+                    provider: provider,
+                    contextWindow: nil,
+                    supportsStreaming: true,
+                    supportsJSONMode: true,
+                    lifecycle: .unknown
+                )
+            ]
+        }
+
+        if filtered.contains(where: { $0.id == trimmed }) {
+            return filtered
+        }
+
+        return filtered + [
+            ProviderModelDescriptor(
+                id: trimmed,
+                displayName: trimmed,
+                provider: provider,
+                contextWindow: nil,
+                supportsStreaming: true,
+                supportsJSONMode: true,
+                lifecycle: .unknown
+            )
+        ]
+    }
+
+    private func modelRefreshStatus(for provider: LLMProvider) -> String {
+        let updatedAt: Date?
+        let models: [ProviderModelDescriptor]
+        switch provider {
+        case .openAI:
+            updatedAt = openAIModelsUpdatedAt
+            models = openAIModels
+        case .sambaNova:
+            updatedAt = sambaNovaModelsUpdatedAt
+            models = sambaNovaModels
+        }
+
+        if let updatedAt {
+            return "Loaded \(models.count) models on \(updatedAt.formatted(date: .abbreviated, time: .shortened))."
+        }
+        return models.isEmpty ? "No models cached yet." : "Loaded \(models.count) models."
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 settingsHeader
-                apiKeySection
-                tScriptServerSection
+                textGenerationProvidersSection
+                insightDefaultsSection
                 if BuildFeatures.nameSuggestionsEnabled {
                     nameSuggestionsSection
                 }
-                workflowSection
+                tScriptServerSection
             }
             .frame(maxWidth: Self.contentColumnWidth, alignment: .topLeading)
             .padding(.horizontal, 28)
@@ -3208,79 +3721,99 @@ private struct SettingsSheetView: View {
             .frame(maxWidth: .infinity, alignment: .center)
         }
         .frame(minWidth: 560, minHeight: 360, alignment: .topLeading)
+        .background(
+            TotalRecAmbientBackground(
+                accent: TotalRecGlass.transcriptViolet,
+                secondaryAccent: TotalRecGlass.captureBlue
+            )
+        )
     }
 
     private var settingsHeader: some View {
-        HStack(alignment: .firstTextBaseline) {
+        HStack(alignment: .center) {
             Text("Settings")
                 .font(.title2.bold())
             Spacer()
             Button("Done") { onClose() }
-                .buttonStyle(.borderedProminent)
+                .totalRecGlassButton(prominent: true)
                 .keyboardShortcut(.cancelAction)
+                .controlSize(.large)
         }
     }
 
-    private var apiKeySection: some View {
+    private var textGenerationProvidersSection: some View {
         settingsSectionCard(
-            title: "OpenAI API Key",
-            subtitle: hasOpenAIKey
-                ? "Stored in Keychain and used for OpenAI transcription and notes."
-                : "OpenAI features stay unavailable until you add a key."
+            title: "Text Generation Providers",
+            subtitle: "Store provider credentials, refresh `/models`, and choose defaults for Insights and speaker name suggestions."
         ) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 14) {
-                    apiKeyField
-                        .frame(maxWidth: Self.apiKeyFieldWidth, alignment: .leading)
-                    Spacer(minLength: 0)
-                    apiKeyStatusBlock
-                }
+            VStack(alignment: .leading, spacing: 14) {
+                providerCredentialCard(
+                    provider: .openAI,
+                    subtitle: hasOpenAIKey
+                        ? "Stored in Keychain and used for OpenAI transcription, Insights, and compatible chat-completions workflows."
+                        : "OpenAI features stay unavailable until you add a key.",
+                    apiKey: $openAIAPIKey,
+                    hasKey: hasOpenAIKey,
+                    baseURLBinding: nil,
+                    models: openAIModels,
+                    isLoading: isOpenAIModelsLoading,
+                    refreshError: openAIModelsError
+                )
 
-                VStack(alignment: .leading, spacing: 12) {
-                    apiKeyField
-                    apiKeyStatusBlock
-                }
+                providerCredentialCard(
+                    provider: .sambaNova,
+                    subtitle: hasSambaNovaKey
+                        ? "Stored in Keychain and used for SambaNova chat-completions features."
+                        : "Add a SambaNova key to enable provider-backed Insights and name suggestions.",
+                    apiKey: $sambaNovaAPIKey,
+                    hasKey: hasSambaNovaKey,
+                    baseURLBinding: $sambaNovaBaseURL,
+                    models: sambaNovaModels,
+                    isLoading: isSambaNovaModelsLoading,
+                    refreshError: sambaNovaModelsError
+                )
             }
         }
     }
 
-    private var apiKeyField: some View {
-        HStack(spacing: 10) {
-            Image(systemName: hasOpenAIKey ? "key.fill" : "key")
-                .foregroundStyle(hasOpenAIKey ? .green : .secondary)
-
-            DeferredCommitSecureField("sk-...", text: $openAIAPIKey)
-                .textFieldStyle(.plain)
-                .font(.system(.body, design: .monospaced))
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(hasOpenAIKey ? Color.green.opacity(0.22) : Color.gray.opacity(0.18), lineWidth: 1)
-        )
-    }
-
-    private var apiKeyStatusBlock: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(
-                hasOpenAIKey ? "Key saved" : "No key saved",
-                systemImage: hasOpenAIKey ? "checkmark.circle.fill" : "exclamationmark.circle"
-            )
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(hasOpenAIKey ? .green : .secondary)
-
-            if hasOpenAIKey {
-                Button("Clear Key") {
-                    openAIAPIKey = ""
+    private var insightDefaultsSection: some View {
+        settingsSectionCard(
+            title: "Insights",
+            subtitle: "Choose the default workflow and provider/model pair used for transcript-derived artifacts."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Default Insight Workflow", selection: $defaultInsightWorkflow) {
+                    ForEach(InsightWorkflow.allCases) { workflow in
+                        Text(workflow.displayName).tag(workflow)
+                    }
                 }
-                .font(.caption.weight(.semibold))
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .pickerStyle(.menu)
+                .frame(maxWidth: 280, alignment: .leading)
+
+                Text(defaultInsightWorkflow.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker("Insights Provider", selection: $defaultInsightProvider) {
+                    ForEach(LLMProvider.allCases) { provider in
+                        Text(provider.displayName).tag(provider)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Picker("Insights Model", selection: $defaultInsightModelID) {
+                    ForEach(effectiveModelChoices(for: defaultInsightProvider, feature: .insights, selectedID: defaultInsightModelID)) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: 360, alignment: .leading)
+
+                Text("New sessions start from the \(defaultInsightWorkflow.displayName.lowercased()) workflow and use \(defaultInsightProvider.displayName) with the selected model by default.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
-        .frame(minWidth: 110, alignment: .leading)
     }
 
     private var nameSuggestionsSection: some View {
@@ -3288,13 +3821,33 @@ private struct SettingsSheetView: View {
             title: "Name Suggestions",
             subtitle: "Choose how speaker names are suggested for diarized transcripts."
         ) {
-            Picker("Name Suggestions Provider", selection: $nameSuggestionProvider) {
-                ForEach(NameSuggestionProvider.allCases) { option in
-                    Text(option.displayName).tag(option)
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Name Suggestions Provider", selection: $nameSuggestionProvider) {
+                    ForEach(NameSuggestionProvider.allCases) { option in
+                        Text(option.displayName).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 420, alignment: .leading)
+
+                if let llmProvider = nameSuggestionProvider.llmProvider {
+                    Picker("Name Suggestion Model", selection: $nameSuggestionModelID) {
+                        ForEach(effectiveModelChoices(for: llmProvider, feature: .nameSuggestions, selectedID: nameSuggestionModelID)) { model in
+                            Text(model.displayName).tag(model.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 360, alignment: .leading)
+
+                    Text("Speaker cleanup will use \(llmProvider.displayName) with the selected model when AI suggestions are enabled.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Speaker name suggestions are disabled. The cleanup view will stay manual.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 360, alignment: .leading)
         }
     }
 
@@ -3308,12 +3861,15 @@ private struct SettingsSheetView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     Image(systemName: hasTScriptBaseURL ? "server.rack" : "network.slash")
-                        .foregroundStyle(hasTScriptBaseURL ? .green : .secondary)
+                        .foregroundStyle(hasTScriptBaseURL ? TotalRecGlass.accentForeground(TotalRecGlass.successGreen) : .secondary)
 
                     DeferredCommitTextField("https://transcribe-api.localhost:1355", text: $tScriptConfiguration.baseURL)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
                         .font(.system(.body, design: .monospaced))
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .totalRecReadableInset(cornerRadius: 12)
 
                 if hasTScriptBaseURL {
                     LabeledContent("Resolved Endpoint") {
@@ -3333,29 +3889,16 @@ private struct SettingsSheetView: View {
                 if let warning = tScriptTransportWarningText {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.warningAmber))
 
                         Text(warning)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     .padding(12)
-                    .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.orange.opacity(0.22), lineWidth: 1)
-                    )
+                    .totalRecGlassRoundedRect(cornerRadius: 12, tint: TotalRecGlass.warningAmber)
                 }
             }
-        }
-    }
-
-    private var workflowSection: some View {
-        settingsSectionCard(
-            title: "Workflow",
-            subtitle: "Transcription provider, model selection, upload chunking, and per-run options now live in the Transcript workspace so each run can be configured in context."
-        ) {
-            EmptyView()
         }
     }
 
@@ -3374,11 +3917,136 @@ private struct SettingsSheetView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.gray.opacity(0.12), lineWidth: 1)
-        )
+        .totalRecStaticPanel(cornerRadius: 18)
+    }
+
+    @ViewBuilder
+    private func providerCredentialCard(
+        provider: LLMProvider,
+        subtitle: String,
+        apiKey: Binding<String>,
+        hasKey: Bool,
+        baseURLBinding: Binding<String>?,
+        models: [ProviderModelDescriptor],
+        isLoading: Bool,
+        refreshError: String?
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(provider.displayName)
+                .font(.subheadline.weight(.semibold))
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 14) {
+                    providerAPIKeyField(apiKey: apiKey, hasKey: hasKey)
+                        .frame(maxWidth: Self.apiKeyFieldWidth, alignment: .leading)
+                    Spacer(minLength: 0)
+                    providerStatusBlock(provider: provider, hasKey: hasKey, models: models, isLoading: isLoading)
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    providerAPIKeyField(apiKey: apiKey, hasKey: hasKey)
+                    providerStatusBlock(provider: provider, hasKey: hasKey, models: models, isLoading: isLoading)
+                }
+            }
+
+            if let baseURLBinding {
+                HStack(spacing: 10) {
+                    Image(systemName: "network")
+                        .foregroundStyle(.secondary)
+
+                    DeferredCommitTextField(provider.defaultBaseURL, text: baseURLBinding)
+                        .textFieldStyle(.plain)
+                        .font(.system(.body, design: .monospaced))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .totalRecReadableInset(cornerRadius: 12)
+
+                Text("Base URL defaults to \(provider.defaultBaseURL). Change it only if SambaNova gives you a different endpoint.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                Button(isLoading ? "Refreshing…" : "Refresh Models") {
+                    onRefreshModels(provider)
+                }
+                .disabled(isLoading || !hasKey)
+                .totalRecGlassButton()
+                .controlSize(.small)
+
+                Text(modelRefreshStatus(for: provider))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let refreshError, !refreshError.isEmpty {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.warningAmber))
+
+                    Text(refreshError)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .totalRecGlassRoundedRect(cornerRadius: 12, tint: TotalRecGlass.warningAmber)
+            }
+        }
+        .padding(14)
+        .totalRecReadableInset(cornerRadius: 16)
+    }
+
+    private func providerAPIKeyField(apiKey: Binding<String>, hasKey: Bool) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: hasKey ? "key.fill" : "key")
+                .foregroundStyle(hasKey ? TotalRecGlass.accentForeground(TotalRecGlass.successGreen) : .secondary)
+
+            DeferredCommitSecureField("sk-...", text: apiKey)
+                .textFieldStyle(.plain)
+                .font(.system(.body, design: .monospaced))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .totalRecReadableInset(cornerRadius: 12)
+    }
+
+    private func providerStatusBlock(
+        provider: LLMProvider,
+        hasKey: Bool,
+        models: [ProviderModelDescriptor],
+        isLoading: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(
+                hasKey ? "Key saved" : "No key saved",
+                systemImage: hasKey ? "checkmark.circle.fill" : "exclamationmark.circle"
+            )
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(hasKey ? TotalRecGlass.accentForeground(TotalRecGlass.successGreen) : .secondary)
+
+            Text(isLoading ? "Refreshing model catalog…" : "\(models.count) models cached")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if hasKey {
+                Button("Clear Key") {
+                    switch provider {
+                    case .openAI:
+                        openAIAPIKey = ""
+                    case .sambaNova:
+                        sambaNovaAPIKey = ""
+                    }
+                }
+                .font(.caption.weight(.semibold))
+                .totalRecGlassButton()
+                .controlSize(.small)
+            }
+        }
+        .frame(minWidth: 120, alignment: .leading)
     }
 }
 
@@ -3478,36 +4146,73 @@ private struct URLImportSheet: View {
 
     @FocusState private var isFieldFocused: Bool
 
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section(header: Text("Audio URL")) {
-                    TextField("https://example.com/audio.m4a", text: $urlString)
-                        .textFieldStyle(.roundedBorder)
-                        .disableAutocorrection(true)
-                        .focused($isFieldFocused)
-                }
+    private var trimmedURLString: String {
+        urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-                if isImporting {
-                    HStack(spacing: 12) {
-                        ProgressView()
-                        Text("Downloading…")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Import from URL")
+                    .font(.title2.bold())
+                Text("Paste a direct audio file URL to download it into a new recoverable session.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
-            .navigationTitle("Import from URL")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { onDismiss() }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Audio URL")
+                    .font(.subheadline.weight(.semibold))
+
+                TextField(
+                    "",
+                    text: $urlString,
+                    prompt: Text("https://example.com/audio.m4a").foregroundStyle(.secondary)
+                )
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+                .focused($isFieldFocused)
+            }
+
+            if isImporting {
+                HStack(spacing: 12) {
+                    ProgressView()
+                    Text("Downloading audio…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Import") { onImport(urlString) }
-                        .disabled(urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isImporting)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .totalRecStaticRoundedRect(cornerRadius: 12, tint: TotalRecGlass.captureBlue)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 10) {
+                Spacer()
+
+                Button("Cancel") {
+                    onDismiss()
                 }
+                .keyboardShortcut(.cancelAction)
+                .totalRecGlassButton()
+
+                Button("Import") {
+                    onImport(urlString)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(trimmedURLString.isEmpty || isImporting)
+                .totalRecGlassButton(prominent: true)
             }
         }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            TotalRecAmbientBackground(
+                accent: TotalRecGlass.captureBlue,
+                secondaryAccent: TotalRecGlass.transcriptViolet
+            )
+        )
         .onAppear {
             isFieldFocused = true
         }
@@ -3592,6 +4297,66 @@ private final class TranscriptSavePanelCoordinator: NSObject, NSOpenSavePanelDel
         let baseName = URL(fileURLWithPath: currentName).deletingPathExtension().lastPathComponent
         guard !baseName.isEmpty else {
             return format.suggestedFilename(hasSpeakerLabels: hasSpeakerLabels)
+        }
+        return "\(baseName).\(format.preferredPathExtension)"
+    }
+}
+
+private final class InsightArtifactSavePanelCoordinator: NSObject, NSOpenSavePanelDelegate {
+    private let panel: NSSavePanel
+    private let formats: [ContentView.InsightArtifactExportFormat]
+    private let artifact: InsightArtifact
+
+    private(set) var selectedFormat: ContentView.InsightArtifactExportFormat
+
+    init(
+        panel: NSSavePanel,
+        formats: [ContentView.InsightArtifactExportFormat],
+        artifact: InsightArtifact
+    ) {
+        precondition(!formats.isEmpty, "Insight artifact save panel requires at least one export format.")
+
+        self.panel = panel
+        self.formats = formats
+        self.artifact = artifact
+        self.selectedFormat = formats[0]
+
+        super.init()
+    }
+
+    @available(macOS 15.0, *)
+    func panel(_ sender: Any, displayNameFor type: UTType) -> String? {
+        format(for: type)?.displayName
+    }
+
+    @available(macOS 15.0, *)
+    func panel(_ sender: Any, didSelect type: UTType?) {
+        guard let format = format(for: type) else { return }
+        selectedFormat = format
+        panel.nameFieldStringValue = suggestedFilename(for: format, preserveCurrentBaseName: true)
+    }
+
+    private func format(for contentType: UTType?) -> ContentView.InsightArtifactExportFormat? {
+        guard let contentType else { return nil }
+        return formats.first(where: { $0.contentType == contentType })
+    }
+
+    private func suggestedFilename(
+        for format: ContentView.InsightArtifactExportFormat,
+        preserveCurrentBaseName: Bool
+    ) -> String {
+        guard preserveCurrentBaseName else {
+            return format.suggestedFilename(for: artifact)
+        }
+
+        let currentName = panel.nameFieldStringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !currentName.isEmpty else {
+            return format.suggestedFilename(for: artifact)
+        }
+
+        let baseName = URL(fileURLWithPath: currentName).deletingPathExtension().lastPathComponent
+        guard !baseName.isEmpty else {
+            return format.suggestedFilename(for: artifact)
         }
         return "\(baseName).\(format.preferredPathExtension)"
     }

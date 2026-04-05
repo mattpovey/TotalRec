@@ -1,6 +1,6 @@
 import Foundation
 
-enum TScriptDiarizationMode: String, CaseIterable, Codable, Identifiable {
+enum TScriptDiarizationMode: String, CaseIterable, Codable, Identifiable, Sendable {
     case off
     case standard
     case tiny
@@ -19,7 +19,7 @@ enum TScriptDiarizationMode: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-struct TScriptAdvancedOptions: Codable, Equatable {
+struct TScriptAdvancedOptions: Codable, Equatable, Sendable {
     var flashAttention: Bool
     var splitOnWord: Bool
     var threads: String
@@ -53,7 +53,7 @@ struct TScriptAdvancedOptions: Codable, Equatable {
     }
 }
 
-struct TScriptConfiguration: Codable, Equatable {
+struct TScriptConfiguration: Codable, Equatable, Sendable {
     var baseURL: String
     var selectedModelID: String
     var language: String

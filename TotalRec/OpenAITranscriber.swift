@@ -16,7 +16,7 @@ private extension OpenAITranscriber {
 }
 
 struct OpenAITranscriber {
-    struct KnownSpeaker {
+    struct KnownSpeaker: Sendable {
         let name: String
         let reference: String?
         init(name: String, reference: String? = nil) {

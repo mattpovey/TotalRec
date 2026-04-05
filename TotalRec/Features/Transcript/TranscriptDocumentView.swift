@@ -19,12 +19,10 @@ struct TranscriptDocumentView: View {
             ) {
                 if transcript.hasDisplayText {
                     ScrollView {
-                        Text(transcript.attributedDisplayText)
+                        TranscriptDocumentContent(transcript: transcript)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
                             .padding(12)
-                            .background(Color.gray.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .totalRecReadableInset(cornerRadius: 12)
                     }
                     .frame(minHeight: 420)
                 } else {
@@ -35,6 +33,48 @@ struct TranscriptDocumentView: View {
                 }
             }
         }
+    }
+}
+
+private struct TranscriptDocumentContent: View {
+    let transcript: TranscriptState
+
+    var body: some View {
+        Group {
+            if transcript.segments.isEmpty {
+                Text(transcript.rawText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            } else {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(transcript.segments) { segment in
+                        TranscriptDocumentLine(
+                            speakerLabel: TranscriptState.canonicalSpeakerLabel(segment.speakerLabel).map(transcript.alias(for:)),
+                            text: segment.text
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+            }
+        }
+    }
+}
+
+private struct TranscriptDocumentLine: View {
+    let speakerLabel: String?
+    let text: String
+
+    var body: some View {
+        lineText
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var lineText: Text {
+        if let speakerLabel {
+            return Text("\(Text("\(speakerLabel):").fontWeight(.semibold)) \(text)")
+        }
+        return Text(text)
     }
 }
 
@@ -64,11 +104,15 @@ private struct TranscriptDocumentActionCard: View {
 
     private var actionButtons: some View {
         Group {
-            Button("Copy Transcript (Markdown)", action: onCopyMarkdown)
-                .buttonStyle(.bordered)
+            Button(action: onCopyMarkdown) {
+                Label("Copy Transcript (Markdown)", systemImage: "doc.on.doc")
+            }
+                .totalRecGlassButton()
 
-            Button("Save Transcript…", action: onSaveTranscript)
-                .buttonStyle(.bordered)
+            Button(action: onSaveTranscript) {
+                Label("Save Transcript…", systemImage: "square.and.arrow.down")
+            }
+                .totalRecGlassButton()
         }
     }
 }
@@ -92,11 +136,7 @@ private struct TranscriptDocumentPanel<Content: View>: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.gray.opacity(0.12), lineWidth: 1)
-        )
+        .totalRecStaticPanel(cornerRadius: 16)
     }
 }
 

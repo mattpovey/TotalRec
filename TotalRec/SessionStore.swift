@@ -5,7 +5,16 @@ struct SessionStore {
         var sessionID: UUID
     }
 
-    private let fileManager = FileManager.default
+    private let fileManager: FileManager
+    private let baseDirectoryURL: URL?
+
+    init(
+        fileManager: FileManager = .default,
+        baseDirectoryURL: URL? = nil
+    ) {
+        self.fileManager = fileManager
+        self.baseDirectoryURL = baseDirectoryURL
+    }
 
     func loadLatestSession() throws -> RecordingSession? {
         let pointerURL = try currentSessionPointerURL()
@@ -109,8 +118,14 @@ struct SessionStore {
             .map { $0 }
     }
 
-    func createSession(sourceDescription: String) throws -> RecordingSession {
-        let session = RecordingSession(sourceDescription: sourceDescription)
+    func createSession(
+        sourceDescription: String,
+        insightSettings: InsightSettings = InsightSettings()
+    ) throws -> RecordingSession {
+        let session = RecordingSession(
+            sourceDescription: sourceDescription,
+            insightSettings: insightSettings
+        )
         try ensureDirectoryExists(at: sessionDirectoryURL(for: session))
         try save(session)
         return session
@@ -179,6 +194,11 @@ struct SessionStore {
     }
 
     private func applicationSupportDirectoryURL() throws -> URL {
+        if let baseDirectoryURL {
+            try ensureDirectoryExists(at: baseDirectoryURL)
+            return baseDirectoryURL
+        }
+
         let base = try fileManager.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,

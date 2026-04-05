@@ -1,6 +1,6 @@
 import Foundation
 
-struct TScriptTranscriptionRunConfiguration {
+struct TScriptTranscriptionRunConfiguration: Sendable {
     let baseURL: String
     let configuration: TScriptConfiguration
 }

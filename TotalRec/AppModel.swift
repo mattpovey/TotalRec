@@ -13,17 +13,42 @@ final class AppModel: ObservableObject {
     @Published private(set) var isImportingAudio = false
     @Published private(set) var processingPreviewText = ""
     @Published private(set) var recoveryNotice: String?
+    @Published private(set) var insightStreamingText = ""
+    @Published private(set) var insightRunStartedAt: Date?
+    @Published private(set) var isStoppingInsightArtifact = false
     @Published var showPermissionAlert = false
-    @Published var meetingNotesError: String?
+    @Published var insightRunError: String?
     @Published var systemGain: Float = 1.0
     @Published var micGain: Float = 1.0
 
-    private let store = SessionStore()
-    private let recorder = SystemAudioRecorder()
-    private let transcriber = FileTranscriber()
+    private let store: SessionStore
+    private let recorder: any AudioRecording
+    private let transcriber: any AudioTranscribing
+    private let insightGenerator: any InsightGenerating
+    private let defaultInsightSettingsProvider: () -> InsightSettings
+    private var insightGenerationTask: Task<Void, Never>?
 
-    private init() {
-        restoreLatestSession()
+    init(
+        store: SessionStore? = nil,
+        recorder: (any AudioRecording)? = nil,
+        transcriber: (any AudioTranscribing)? = nil,
+        insightGenerator: (any InsightGenerating)? = nil,
+        defaultInsightSettingsProvider: (() -> InsightSettings)? = nil,
+        shouldRestoreLatestSession: Bool = true
+    ) {
+        self.store = store ?? SessionStore()
+        self.recorder = recorder ?? SystemAudioRecorder()
+        self.transcriber = transcriber ?? FileTranscriber()
+        self.insightGenerator = insightGenerator ?? InsightGenerationService()
+        self.defaultInsightSettingsProvider = defaultInsightSettingsProvider ?? {
+            InsightSettings(selectedWorkflow: AIConfigManager.shared.configuration.normalizedInsightWorkflow)
+        }
+
+        if shouldRestoreLatestSession {
+            restoreLatestSession()
+        } else {
+            refreshRecentSessions()
+        }
     }
 
     var status: String {
@@ -61,8 +86,16 @@ final class AppModel: ObservableObject {
         activeSession?.transcriptState ?? TranscriptState()
     }
 
-    var meetingNotes: String {
-        activeSession?.meetingNotes ?? ""
+    var insightArtifact: InsightArtifact? {
+        activeSession?.insightArtifact
+    }
+
+    var insightArtifactContent: String {
+        insightArtifact?.content ?? ""
+    }
+
+    var insightSettings: InsightSettings {
+        activeSession?.insightSettings ?? defaultInsightSettingsProvider()
     }
 
     var isRecording: Bool {
@@ -73,7 +106,7 @@ final class AppModel: ObservableObject {
         activeSession?.stage == .transcribing
     }
 
-    var isGeneratingMeetingNotes: Bool {
+    var isGeneratingInsightArtifact: Bool {
         activeSession?.stage == .generatingInsights
     }
 
@@ -94,45 +127,11 @@ final class AppModel: ObservableObject {
     }
 
     var menuBarIconName: String {
-        switch activeSession?.stage {
-        case .recording:
-            return "record.circle"
-        case .preparingRecording:
-            return "record.circle.dotted"
-        case .mixingDown, .transcribing, .generatingInsights, .importingAudio:
-            return "gearshape.2"
-        case .failed:
-            return "exclamationmark.triangle"
-        case .readyToTranscribe, .completed:
-            return "waveform.and.mic"
-        case .idle, .none:
-            return "waveform"
-        }
+        activeSession?.stage.totalRecMenuBarIconName ?? SessionStage.idle.totalRecMenuBarIconName
     }
 
     var menuBarTitle: String {
-        switch activeSession?.stage {
-        case .recording:
-            return "Recording"
-        case .preparingRecording:
-            return "Preparing Recording"
-        case .mixingDown:
-            return "Mixing Down"
-        case .transcribing:
-            return "Transcribing"
-        case .generatingInsights:
-            return "Generating Notes"
-        case .importingAudio:
-            return "Importing Audio"
-        case .readyToTranscribe:
-            return "Ready to Transcribe"
-        case .completed:
-            return "Session Saved"
-        case .failed:
-            return "Attention Needed"
-        case .idle, .none:
-            return "Ready"
-        }
+        activeSession?.stage.totalRecMenuBarTitle ?? SessionStage.idle.totalRecMenuBarTitle
     }
 
     var recordingStartedAt: Date? {
@@ -147,6 +146,14 @@ final class AppModel: ObservableObject {
         return String(format: "%02d:%02d", minutes, seconds)
     }
 
+    var insightRunElapsedText: String? {
+        guard let insightRunStartedAt, isGeneratingInsightArtifact else { return nil }
+        let elapsed = Int(Date().timeIntervalSince(insightRunStartedAt))
+        let minutes = elapsed / 60
+        let seconds = elapsed % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+
     func clearPermissionAlert() {
         showPermissionAlert = false
     }
@@ -155,12 +162,60 @@ final class AppModel: ObservableObject {
         recoveryNotice = nil
     }
 
+    func updateInsightSettings(_ settings: InsightSettings) {
+        mutateActiveSession { session in
+            session.insightSettings = settings
+        }
+    }
+
     func startRecording() {
         Task {
             await startRecording { [weak self] in
                 self?.showPermissionAlert = true
             }
         }
+    }
+
+    func startInsightArtifactGeneration() {
+        guard insightGenerationTask == nil else { return }
+
+        insightGenerationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.insightGenerationTask = nil
+                self.isStoppingInsightArtifact = false
+            }
+
+            do {
+                try await self.generateInsightArtifact()
+            } catch is CancellationError {
+                // Cancellation is user initiated and already reflected in model state.
+            } catch {
+                // AppModel already surfaced the failure state.
+            }
+        }
+    }
+
+    func stopInsightArtifactGeneration() {
+        guard let insightGenerationTask, isGeneratingInsightArtifact else { return }
+
+        DiagnosticsLogger.log(
+            category: "Insights",
+            message: "Stopping insight artifact generation.",
+            metadata: [
+                "workflow": insightSettings.selectedWorkflow.rawValue,
+                "streamedChars": "\(insightStreamingText.count)"
+            ]
+        )
+
+        isStoppingInsightArtifact = true
+        mutateActiveSession { session in
+            session.statusMessage = "Stopping insight generation..."
+            session.lastError = nil
+            session.updatedAt = Date()
+        }
+
+        insightGenerationTask.cancel()
     }
 
     func selectSession(_ sessionID: UUID) {
@@ -173,8 +228,7 @@ final class AppModel: ObservableObject {
             guard var session = try store.loadSession(id: sessionID) else { return }
             recoveryNotice = normalizeRecoveredState(for: &session)
             setActiveSession(session, persist: recoveryNotice != nil)
-            processingPreviewText = ""
-            meetingNotesError = nil
+            resetTransientRunState()
         } catch {
             updateStatus("Failed to open session: \(error.localizedDescription)")
         }
@@ -187,8 +241,7 @@ final class AppModel: ObservableObject {
         }
 
         activeSession = nil
-        processingPreviewText = ""
-        meetingNotesError = nil
+        resetTransientRunState()
         recoveryNotice = nil
         try? store.clearCurrentSession()
         refreshRecentSessions()
@@ -204,13 +257,13 @@ final class AppModel: ObservableObject {
             let deletingActiveSession = activeSession?.id == sessionID
             try store.deleteSession(sessionID)
 
-            processingPreviewText = ""
-            meetingNotesError = nil
+            resetTransientRunState()
             recoveryNotice = nil
 
             if deletingActiveSession {
                 if let replacement = try store.listRecentSessions().first {
                     setActiveSession(replacement)
+                    refreshRecentSessions()
                 } else {
                     activeSession = nil
                     try? store.clearCurrentSession()
@@ -239,13 +292,12 @@ final class AppModel: ObservableObject {
         updateTranscript(transcriptState)
     }
 
-    func updateMeetingNotes(_ notes: String) {
+    func updateInsightArtifact(_ artifact: InsightArtifact?) {
         mutateActiveSession { session in
-            session.meetingNotes = notes
-            session.updatedAt = Date()
-            if !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            session.insightArtifact = artifact
+            if artifact?.hasContent == true {
                 session.stage = .completed
-                session.statusMessage = "Meeting notes updated."
+                session.statusMessage = "Insight artifact updated."
             }
         }
     }
@@ -272,10 +324,13 @@ final class AppModel: ObservableObject {
 
     func startRecording(onPermissionNeeded: @escaping () -> Void) async {
         guard !hasProtectedActivity else { return }
-        meetingNotesError = nil
+        resetInsightRunState()
 
         do {
-            var session = try store.createSession(sourceDescription: "Recording \(Self.sessionDateFormatter.string(from: Date()))")
+            var session = try store.createSession(
+                sourceDescription: "Recording \(Self.sessionDateFormatter.string(from: Date()))",
+                insightSettings: defaultInsightSettingsProvider()
+            )
             let movieURL = try store.captureMovieURL(for: session)
             session.captureMovieFilename = movieURL.lastPathComponent
             session.stage = .preparingRecording
@@ -307,7 +362,7 @@ final class AppModel: ObservableObject {
     @discardableResult
     func stopRecording() async -> Bool {
         guard isRecording || activeSession?.stage == .mixingDown else { return false }
-        meetingNotesError = nil
+        resetInsightRunState()
 
         updateStatus("Stopping recording...")
 
@@ -373,7 +428,7 @@ final class AppModel: ObservableObject {
         let provider = configuration.provider
 
         processingPreviewText = ""
-        meetingNotesError = nil
+        resetInsightRunState()
         mutateActiveSession { session in
             session.stage = .transcribing
             session.statusMessage = "Transcribing..."
@@ -409,7 +464,7 @@ final class AppModel: ObservableObject {
                         userInfo: [NSLocalizedDescriptionKey: "TScript configuration is missing."]
                     )
                 }
-                let result = try await TScriptTranscriber().transcribe(
+                let result = try await Self.transcribeWithTScriptOffMain(
                     audioURL: audioURL,
                     configuration: tscriptConfiguration
                 )
@@ -458,38 +513,100 @@ final class AppModel: ObservableObject {
         return "Transcription complete. (TScript, warning)"
     }
 
-    func generateMeetingNotes(promptOverride: String?) async throws {
+    func generateInsightArtifact() async throws {
         guard transcriptState.hasDisplayText else {
-            meetingNotesError = MeetingNotesService.ServiceError.missingTranscript.localizedDescription
-            throw MeetingNotesService.ServiceError.missingTranscript
+            insightRunError = InsightGenerationService.ServiceError.missingTranscript.localizedDescription
+            throw InsightGenerationService.ServiceError.missingTranscript
         }
 
-        meetingNotesError = nil
+        DiagnosticsLogger.log(
+            category: "Insights",
+            message: "Starting insight artifact generation.",
+            metadata: [
+                "workflow": insightSettings.selectedWorkflow.rawValue,
+                "customPrompt": insightSettings.useCustomPrompt ? "true" : "false",
+                "transcriptChars": "\(transcriptState.rawText.count)"
+            ]
+        )
+
+        insightRunError = nil
+        insightStreamingText = ""
+        insightRunStartedAt = Date()
 
         mutateActiveSession { session in
             session.stage = .generatingInsights
-            session.statusMessage = "Generating meeting notes..."
+            session.statusMessage = "Generating insight artifact..."
             session.lastError = nil
             session.updatedAt = Date()
         }
 
         do {
-            let notes = try await MeetingNotesService().generateNotes(from: transcriptState, promptOverride: promptOverride)
+            let artifact = try await insightGenerator.generateArtifact(
+                from: transcriptState,
+                settings: insightSettings
+            ) { [weak self] event in
+                Task { @MainActor in
+                    self?.applyInsightGenerationEvent(event)
+                }
+            }
+            try Task.checkCancellation()
+
             mutateActiveSession { session in
-                session.meetingNotes = notes
+                session.insightArtifact = artifact
                 session.stage = .completed
-                session.statusMessage = "Meeting notes ready."
+                session.statusMessage = "\(artifact.title) ready."
                 session.lastError = nil
                 session.updatedAt = Date()
             }
-        } catch {
-            meetingNotesError = error.localizedDescription
+            insightStreamingText = ""
+            insightRunStartedAt = nil
+            insightRunError = nil
+            DiagnosticsLogger.log(
+                category: "Insights",
+                message: "Insight artifact generation completed.",
+                metadata: [
+                    "workflow": artifact.workflow.rawValue,
+                    "artifactChars": "\(artifact.content.count)",
+                    "transport": artifact.transport.rawValue
+                ]
+            )
+        } catch is CancellationError {
+            DiagnosticsLogger.log(
+                category: "Insights",
+                message: "Insight artifact generation stopped.",
+                metadata: [
+                    "workflow": insightSettings.selectedWorkflow.rawValue,
+                    "streamedChars": "\(insightStreamingText.count)"
+                ]
+            )
+            insightRunStartedAt = nil
+            insightRunError = nil
             mutateActiveSession { session in
                 session.stage = session.transcriptState.isEmpty ? .readyToTranscribe : .completed
-                session.statusMessage = "Meeting notes failed: \(error.localizedDescription)"
+                session.statusMessage = "Insight generation stopped."
+                session.lastError = nil
+                session.updatedAt = Date()
+            }
+            throw CancellationError()
+        } catch {
+            DiagnosticsLogger.logError(
+                category: "Insights",
+                message: "Insight artifact generation failed.",
+                error: error,
+                metadata: [
+                    "workflow": insightSettings.selectedWorkflow.rawValue,
+                    "streamedChars": "\(insightStreamingText.count)",
+                    "runStarted": insightRunStartedAt?.ISO8601Format() ?? "nil"
+                ]
+            )
+            insightRunError = error.localizedDescription
+            mutateActiveSession { session in
+                session.stage = session.transcriptState.isEmpty ? .readyToTranscribe : .completed
+                session.statusMessage = "Insight generation failed: \(error.localizedDescription)"
                 session.lastError = error.localizedDescription
                 session.updatedAt = Date()
             }
+            insightRunStartedAt = nil
             throw error
         }
     }
@@ -512,7 +629,10 @@ final class AppModel: ObservableObject {
         isImportingAudio = true
 
         do {
-            var session = try store.createSession(sourceDescription: description)
+            var session = try store.createSession(
+                sourceDescription: description,
+                insightSettings: defaultInsightSettingsProvider()
+            )
             session.stage = .importingAudio
             session.statusMessage = "Importing audio..."
             session.updatedAt = Date()
@@ -528,7 +648,7 @@ final class AppModel: ObservableObject {
                 current.mixedAudioFilename = importedURL.lastPathComponent
                 current.mixedAudioDuration = duration
                 current.transcriptState = TranscriptState()
-                current.meetingNotes = ""
+                current.insightArtifact = nil
                 current.stage = .readyToTranscribe
                 current.statusMessage = "Imported audio: \(description)"
                 current.lastError = nil
@@ -550,6 +670,7 @@ final class AppModel: ObservableObject {
 
         recoveryNotice = normalizeRecoveredState(for: &restored)
         setActiveSession(restored, persist: recoveryNotice != nil)
+        resetTransientRunState()
         refreshRecentSessions()
     }
 
@@ -563,7 +684,10 @@ final class AppModel: ObservableObject {
     private func markCurrentSessionFailed(_ message: String) {
         if activeSession == nil {
             do {
-                var session = try store.createSession(sourceDescription: "Recovered session")
+                var session = try store.createSession(
+                    sourceDescription: "Recovered session",
+                    insightSettings: defaultInsightSettingsProvider()
+                )
                 session.stage = .failed
                 session.statusMessage = message
                 session.lastError = message
@@ -573,6 +697,7 @@ final class AppModel: ObservableObject {
             } catch {
                 let session = RecordingSession(
                     sourceDescription: "Recovered session",
+                    insightSettings: defaultInsightSettingsProvider(),
                     stage: .failed,
                     statusMessage: message,
                     lastError: message
@@ -600,9 +725,30 @@ final class AppModel: ObservableObject {
 
     private func setActiveSession(_ session: RecordingSession, persist: Bool = false) {
         if persist {
-            try? store.save(session)
+            do {
+                try store.save(session)
+            } catch {
+                DiagnosticsLogger.logError(
+                    category: "SessionStore",
+                    message: "Failed to persist active session.",
+                    error: error,
+                    metadata: [
+                        "sessionID": session.id.uuidString,
+                        "stage": session.stage.rawValue
+                    ]
+                )
+            }
         } else {
-            try? store.setCurrentSession(session.id)
+            do {
+                try store.setCurrentSession(session.id)
+            } catch {
+                DiagnosticsLogger.logError(
+                    category: "SessionStore",
+                    message: "Failed to update current session pointer.",
+                    error: error,
+                    metadata: ["sessionID": session.id.uuidString]
+                )
+            }
         }
         activeSession = session
         mergeActiveSessionIntoRecentSessions(session)
@@ -659,6 +805,33 @@ final class AppModel: ObservableObject {
         session.statusMessage = "Recovered an interrupted session."
         session.updatedAt = Date()
         return recoveryMessage
+    }
+
+    private func applyInsightGenerationEvent(_ event: TextGenerationEvent) {
+        switch event {
+        case .started:
+            if insightRunStartedAt == nil {
+                insightRunStartedAt = Date()
+            }
+        case let .textDelta(delta):
+            insightStreamingText.append(delta)
+        case .completed:
+            break
+        case let .failed(message):
+            insightRunError = message
+        }
+    }
+
+    private func resetInsightRunState() {
+        insightStreamingText = ""
+        insightRunStartedAt = nil
+        insightRunError = nil
+        isStoppingInsightArtifact = false
+    }
+
+    private func resetTransientRunState() {
+        processingPreviewText = ""
+        resetInsightRunState()
     }
 
     private func stopRecorder() async throws -> URL {
@@ -733,6 +906,7 @@ final class AppModel: ObservableObject {
         try await withCheckedThrowingContinuation { continuation in
             transcriber.transcribeFile(
                 at: audioURL,
+                localeID: Locale.current.identifier,
                 onDevicePreferred: onDevicePreferred,
                 onProgress: { [weak self] partial in
                     Task { @MainActor in
@@ -771,15 +945,10 @@ final class AppModel: ObservableObject {
         for (index, chunk) in chunks.enumerated() {
             updateStatus(totalChunks > 1 ? "Transcribing chunk \(index + 1)/\(totalChunks)..." : "Transcribing...")
 
-            let chunkState = try await OpenAITranscriber().transcribeDiarized(
+            let chunkState = try await Self.transcribeOpenAIChunkOffMain(
                 audioURL: chunk.url,
                 apiKey: apiKey,
-                baseURL: "https://api.openai.com",
-                chunkingStrategy: "auto",
-                knownSpeakerNames: nil,
-                knownSpeakerReferences: nil,
-                knownSpeakers: knownSpeakers.isEmpty ? nil : knownSpeakers,
-                onProgress: nil
+                knownSpeakers: knownSpeakers
             )
             combinedState.append(chunkState, timeOffset: chunk.startTime)
         }
@@ -788,6 +957,38 @@ final class AppModel: ObservableObject {
             updateStatus("Transcription complete. (OpenAI, \(totalChunks) chunks)")
         }
         return combinedState
+    }
+
+    private nonisolated static func transcribeOpenAIChunkOffMain(
+        audioURL: URL,
+        apiKey: String,
+        knownSpeakers: [OpenAITranscriber.KnownSpeaker]
+    ) async throws -> TranscriptState {
+        try await Task.detached(priority: .userInitiated) {
+            try await OpenAITranscriber().transcribeDiarized(
+                audioURL: audioURL,
+                apiKey: apiKey,
+                baseURL: "https://api.openai.com",
+                chunkingStrategy: "auto",
+                knownSpeakerNames: nil,
+                knownSpeakerReferences: nil,
+                knownSpeakers: knownSpeakers.isEmpty ? nil : knownSpeakers,
+                onProgress: nil
+            )
+        }.value
+    }
+
+    private nonisolated static func transcribeWithTScriptOffMain(
+        audioURL: URL,
+        configuration: TScriptTranscriptionRunConfiguration
+    ) async throws -> (transcriptState: TranscriptState, warning: String?) {
+        try await Task.detached(priority: .userInitiated) {
+            let result = try await TScriptTranscriber().transcribe(
+                audioURL: audioURL,
+                configuration: configuration
+            )
+            return (result.transcriptState, result.warning)
+        }.value
     }
 
     private static func preferredExtension(from url: URL, fallback: String = "m4a") -> String {

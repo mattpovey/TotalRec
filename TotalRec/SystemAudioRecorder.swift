@@ -2,7 +2,12 @@ import Foundation
 import AVFoundation
 import ScreenCaptureKit
 
-final class SystemAudioRecorder: NSObject, SCStreamOutput, AVCaptureAudioDataOutputSampleBufferDelegate {
+protocol AudioRecording: AnyObject {
+    func startRecording(to url: URL, onPermissionNeeded: @escaping () -> Void) async throws
+    func stopRecording(completion: @escaping (Result<URL, Error>) -> Void)
+}
+
+final class SystemAudioRecorder: NSObject, AudioRecording, SCStreamOutput, AVCaptureAudioDataOutputSampleBufferDelegate {
     private var writer: AVAssetWriter?
     private var systemInput: AVAssetWriterInput?
     private var micInput: AVAssetWriterInput?
