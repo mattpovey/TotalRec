@@ -1,6 +1,10 @@
 import Foundation
 import Security
 
+extension Notification.Name {
+    static let totalRecAIConfigurationDidChange = Notification.Name("TotalRecAIConfigurationDidChange")
+}
+
 struct AIConfiguration: Codable {
     var defaultProvider: String
     var nameSuggestionProvider: String
@@ -454,6 +458,7 @@ final class AIConfigManager {
         let url = try Self.configFileURL()
         let data = try JSONEncoder().encode(configuration)
         try data.write(to: url, options: [.atomic])
+        NotificationCenter.default.post(name: .totalRecAIConfigurationDidChange, object: nil)
     }
 
     private func normalizeProviderConfiguration(for provider: LLMProvider) {

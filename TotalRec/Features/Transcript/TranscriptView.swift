@@ -92,8 +92,66 @@ struct TranscriptSpeakersView: View {
         return transcript.segments
     }
 
+    @ViewBuilder
+    private var speakerWorkspace: some View {
+        #if os(macOS)
+        HStack(alignment: .top, spacing: 16) {
+            speakerListPanel
+                .frame(minWidth: 250, idealWidth: 280, maxWidth: 320, alignment: .topLeading)
+
+            speakerDetailWorkspace
+                .frame(minWidth: 420, maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        #else
+        VStack(alignment: .leading, spacing: 16) {
+            speakerListPanel
+            speakerDetailWorkspace
+        }
+        #endif
+    }
+
+    private var speakerListPanel: some View {
+        TranscriptSpeakerListCard(
+            speakers: viewModel.speakers,
+            selectedSpeakerLabel: $selectedSpeakerLabel,
+            turnCounts: speakerTurnCounts,
+            isRequestInFlight: isRequestInFlight
+        )
+        .onChange(of: selectedSpeakerLabel) { _, newValue in
+            if newValue != nil {
+                transcriptFocusMode = .selectedSpeaker
+            }
+        }
+    }
+
+    private var speakerDetailWorkspace: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            TranscriptSpeakerDetailCard(
+                speaker: selectedSpeaker,
+                speakerTurnCount: selectedSpeaker.map { speakerTurnCounts[$0.label, default: 0] } ?? 0,
+                isRequestInFlight: isRequestInFlight,
+                onCommitAlias: commitAlias,
+                onEditExcerpt: { label in
+                    excerptEditorTarget = ExcerptEditorTarget(label: label)
+                }
+            )
+
+            TranscriptSpeakerTurnsCard(
+                transcript: transcript,
+                selectedSpeaker: selectedSpeaker,
+                focusMode: $transcriptFocusMode,
+                visibleSegments: speakerBrowserSegments,
+                audioURL: audioURL,
+                audioDuration: audioDuration,
+                onUpdateSpeaker: updateSpeakerAssignment
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
     var body: some View {
-        ZStack {
+        ZStack(alignment: .topLeading) {
             VStack(alignment: .leading, spacing: 16) {
                 TranscriptSpeakerActionCard(
                     speakerCount: viewModel.speakers.count,
@@ -108,43 +166,9 @@ struct TranscriptSpeakersView: View {
                     onResetAliases: resetAliases
                 )
 
-                HStack(alignment: .top, spacing: 16) {
-                    TranscriptSpeakerListCard(
-                        speakers: viewModel.speakers,
-                        selectedSpeakerLabel: activeSpeakerLabel,
-                        turnCounts: speakerTurnCounts,
-                        isRequestInFlight: isRequestInFlight,
-                        onSelect: { label in
-                            selectedSpeakerLabel = label
-                            transcriptFocusMode = .selectedSpeaker
-                        }
-                    )
-                    .frame(width: 280)
-
-                    VStack(alignment: .leading, spacing: 16) {
-                        TranscriptSpeakerDetailCard(
-                            speaker: selectedSpeaker,
-                            speakerTurnCount: selectedSpeaker.map { speakerTurnCounts[$0.label, default: 0] } ?? 0,
-                            isRequestInFlight: isRequestInFlight,
-                            onCommitAlias: commitAlias,
-                            onEditExcerpt: { label in
-                                excerptEditorTarget = ExcerptEditorTarget(label: label)
-                            }
-                        )
-
-                        TranscriptSpeakerTurnsCard(
-                            transcript: transcript,
-                            selectedSpeaker: selectedSpeaker,
-                            focusMode: $transcriptFocusMode,
-                            visibleSegments: speakerBrowserSegments,
-                            audioURL: audioURL,
-                            audioDuration: audioDuration,
-                            onUpdateSpeaker: updateSpeakerAssignment
-                        )
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                speakerWorkspace
             }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
             .onAppear {
                 viewModel.update(from: transcript)
                 syncSelectedSpeaker()
@@ -164,7 +188,7 @@ struct TranscriptSpeakersView: View {
                 TranscriptSuggestionOverlay()
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .animation(.easeInOut(duration: 0.12), value: isRequestInFlight)
         .sheet(isPresented: $showSuggestionSheet) {
             suggestionSheet
@@ -217,34 +241,34 @@ struct TranscriptSpeakersView: View {
                         ScrollView {
                             VStack(spacing: 12) {
                                 ForEach($viewModel.suggestions) { $suggestion in
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        HStack(alignment: .firstTextBaseline) {
-                                            Text("Speaker \(suggestion.label)")
-                                                .font(.headline)
-                                            Spacer()
-                                            Text(viewModel.speakers.first(where: { $0.label == suggestion.label })?.alias ?? suggestion.label)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        TextField("Suggested name", text: $suggestion.name)
-                                            .textFieldStyle(.roundedBorder)
-                                            .accessibilityIdentifier("suggestedNameField_\(suggestion.label)")
+                                    TranscriptInsetPanel(cornerRadius: 10) {
+                                        VStack(alignment: .leading, spacing: 6) {
+                                            HStack(alignment: .firstTextBaseline) {
+                                                Text("Speaker \(suggestion.label)")
+                                                    .font(.headline)
+                                                Spacer()
+                                                Text(viewModel.speakers.first(where: { $0.label == suggestion.label })?.alias ?? suggestion.label)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            TextField("Suggested name", text: $suggestion.name)
+                                                .textFieldStyle(.roundedBorder)
+                                                .accessibilityIdentifier("suggestedNameField_\(suggestion.label)")
 
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text("Excerpt Used")
-                                                .font(.caption.weight(.semibold))
-                                                .foregroundStyle(.secondary)
-                                            Text(viewModel.speakers.first(where: { $0.label == suggestion.label })?.excerpt ?? "No excerpt available.")
-                                                .font(.callout)
-                                                .foregroundStyle(.secondary)
-                                                .textSelection(.enabled)
-                                                .padding(10)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .totalRecReadableInset(cornerRadius: 8)
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text("Excerpt Used")
+                                                    .font(.caption.weight(.semibold))
+                                                    .foregroundStyle(.secondary)
+                                                Text(viewModel.speakers.first(where: { $0.label == suggestion.label })?.excerpt ?? "No excerpt available.")
+                                                    .font(.callout)
+                                                    .foregroundStyle(.secondary)
+                                                    .textSelection(.enabled)
+                                                    .padding(10)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                                    .totalRecReadableInset(cornerRadius: 8)
+                                            }
                                         }
                                     }
-                                    .padding()
-                                    .totalRecStaticRoundedRect(cornerRadius: 10)
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -409,14 +433,14 @@ private struct TranscriptSpeakerActionCard: View {
     let onResetAliases: () -> Void
 
     var body: some View {
-        TranscriptWorkspacePanel(
+        TranscriptSurfacePanel(
             title: "Speaker Tools",
             subtitle: BuildFeatures.nameSuggestionsEnabled
-                ? "Rename aliases, request suggestions, play one speaker at a time, and keep consolidation as an explicit action."
-                : "Rename aliases, play one speaker at a time, and keep consolidation as an explicit action."
+                ? "Aliases, suggestions, and consolidation controls."
+                : "Aliases and consolidation controls."
         ) {
             VStack(alignment: .leading, spacing: 12) {
-                TotalRecGlassCluster(spacing: 12) {
+                ViewThatFits(in: .horizontal) {
                     HStack(spacing: 8) {
                         TranscriptSummaryChip(title: "\(speakerCount) speakers", systemImage: "person.2.fill", tint: TotalRecGlass.transcriptViolet)
                         TranscriptSummaryChip(title: "\(turnCount) turns", systemImage: "text.alignleft", tint: TotalRecGlass.captureBlue)
@@ -424,6 +448,14 @@ private struct TranscriptSpeakerActionCard: View {
                             TranscriptSummaryChip(title: "Merge recommended", systemImage: "arrow.triangle.merge", tint: TotalRecGlass.warningAmber)
                         }
                         Spacer(minLength: 0)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        TranscriptSummaryChip(title: "\(speakerCount) speakers", systemImage: "person.2.fill", tint: TotalRecGlass.transcriptViolet)
+                        TranscriptSummaryChip(title: "\(turnCount) turns", systemImage: "text.alignleft", tint: TotalRecGlass.captureBlue)
+                        if hasConsecutiveSpeakerRuns {
+                            TranscriptSummaryChip(title: "Merge recommended", systemImage: "arrow.triangle.merge", tint: TotalRecGlass.warningAmber)
+                        }
                     }
                 }
 
@@ -437,27 +469,25 @@ private struct TranscriptSpeakerActionCard: View {
                     }
                 }
 
-                if BuildFeatures.nameSuggestionsEnabled {
-                    if !areSuggestionsEnabled {
-                        Text("Speaker-name suggestions are disabled in Settings.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else if isRequestInFlight {
-                        Text("Contacting \(suggestionProviderName) for speaker name ideas…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("Suggestions review existing turns and excerpt context. Consolidation and alias reset stay manual.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Text("Aliases, consolidation, and turn review stay manual in this build.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var statusText: String {
+        if BuildFeatures.nameSuggestionsEnabled {
+            if !areSuggestionsEnabled {
+                return "AI suggestions are off in Settings."
+            }
+            if isRequestInFlight {
+                return "Requesting suggestions from \(suggestionProviderName)…"
+            }
+            return "Suggestions are optional. Alias edits and consolidation stay manual."
+        }
+
+        return "Alias edits and consolidation stay manual in this build."
     }
 
     private var actionButtons: some View {
@@ -481,15 +511,14 @@ private struct TranscriptSpeakerActionCard: View {
 
 private struct TranscriptSpeakerListCard: View {
     let speakers: [TranscriptViewModel.SpeakerState]
-    let selectedSpeakerLabel: String?
+    @Binding var selectedSpeakerLabel: String?
     let turnCounts: [String: Int]
     let isRequestInFlight: Bool
-    let onSelect: (String) -> Void
 
     var body: some View {
-        TranscriptWorkspacePanel(
+        TranscriptSurfacePanel(
             title: "Speakers",
-            subtitle: "Choose a speaker to edit aliases, play their clips, and verify attribution in context."
+            subtitle: "Select a speaker to rename or review."
         ) {
             if speakers.isEmpty {
                 Text("Speaker labels will appear once a diarized transcript is available.")
@@ -497,22 +526,22 @@ private struct TranscriptSpeakerListCard: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 10) {
+                TranscriptListContainer {
+                    List(selection: $selectedSpeakerLabel) {
                         ForEach(speakers) { speaker in
-                            Button {
-                                onSelect(speaker.label)
-                            } label: {
-                                TranscriptSpeakerRow(
-                                    speaker: speaker,
-                                    isSelected: selectedSpeakerLabel == speaker.label,
-                                    turnCount: turnCounts[speaker.label, default: 0]
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(isRequestInFlight)
+                            TranscriptSpeakerRow(
+                                speaker: speaker,
+                                turnCount: turnCounts[speaker.label, default: 0]
+                            )
+                            .tag(Optional(speaker.label))
+                            .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
                         }
                     }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .disabled(isRequestInFlight)
                 }
                 .frame(minHeight: 180, maxHeight: 440, alignment: .top)
             }
@@ -522,14 +551,13 @@ private struct TranscriptSpeakerListCard: View {
 
 private struct TranscriptSpeakerRow: View {
     let speaker: TranscriptViewModel.SpeakerState
-    let isSelected: Bool
     let turnCount: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 Text(speaker.alias)
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                 Spacer()
                 Text("Label \(speaker.label)")
@@ -546,23 +574,11 @@ private struct TranscriptSpeakerRow: View {
                 Label("\(turnCount) turns", systemImage: "waveform")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                if isSelected {
-                    Label("Selected", systemImage: "checkmark.circle.fill")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(TotalRecGlass.accentForeground(.accentColor))
-                }
             }
         }
-        .padding(12)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.gray.opacity(0.04))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isSelected ? Color.accentColor.opacity(0.35) : Color.gray.opacity(0.12), lineWidth: 1)
-        )
     }
 }
 
@@ -576,19 +592,27 @@ private struct TranscriptSpeakerDetailCard: View {
     @State private var isSuggestionContextExpanded = false
 
     var body: some View {
-        TranscriptWorkspacePanel(
-            title: speaker.map { "\($0.alias) Detail" } ?? "Speaker Detail",
-            subtitle: BuildFeatures.nameSuggestionsEnabled
-                ? "Aliases change transcript display. Suggestion context only affects future speaker-name requests."
-                : "Aliases change transcript display. Clip playback and reassignment happen below."
+        TranscriptInspectorPanel(
+            title: "Selected Speaker",
+            subtitle: speaker == nil
+                ? "Select a speaker to review alias and context."
+                : "Alias changes update transcript display for future review."
         ) {
             if let speaker {
                 VStack(alignment: .leading, spacing: 12) {
-                    TotalRecGlassCluster(spacing: 12) {
+                    Text(speaker.alias)
+                        .font(.headline)
+
+                    ViewThatFits(in: .horizontal) {
                         HStack(spacing: 8) {
                             TranscriptSummaryChip(title: "Raw label \(speaker.label)", systemImage: "tag", tint: .secondary)
                             TranscriptSummaryChip(title: "\(speakerTurnCount) turns", systemImage: "waveform", tint: TotalRecGlass.captureBlue)
                             Spacer(minLength: 0)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            TranscriptSummaryChip(title: "Raw label \(speaker.label)", systemImage: "tag", tint: .secondary)
+                            TranscriptSummaryChip(title: "\(speakerTurnCount) turns", systemImage: "waveform", tint: TotalRecGlass.captureBlue)
                         }
                     }
 
@@ -606,19 +630,14 @@ private struct TranscriptSpeakerDetailCard: View {
                     if BuildFeatures.nameSuggestionsEnabled {
                         DisclosureGroup(isExpanded: $isSuggestionContextExpanded) {
                             VStack(alignment: .leading, spacing: 10) {
-                                Text("This excerpt is only sent when requesting speaker-name suggestions. It does not edit the transcript or change turn boundaries.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-
-                                Text(speaker.excerpt)
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(4)
-                                    .multilineTextAlignment(.leading)
-                                    .textSelection(.enabled)
-                                    .padding(12)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .totalRecReadableInset(cornerRadius: 10)
+                                TranscriptInsetPanel(cornerRadius: 10) {
+                                    Text(speaker.excerpt)
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(4)
+                                        .multilineTextAlignment(.leading)
+                                        .textSelection(.enabled)
+                                }
 
                                 Button {
                                     onEditExcerpt(speaker.label)
@@ -632,20 +651,21 @@ private struct TranscriptSpeakerDetailCard: View {
                             }
                             .padding(.top, 8)
                         } label: {
-                            Text("Advanced Suggestion Context")
+                            Text("Suggestion Context")
                                 .font(.subheadline.weight(.semibold))
                         }
                     }
                 }
             } else {
-                Text(
-                    BuildFeatures.nameSuggestionsEnabled
-                        ? "Select a speaker to review aliases and suggestion context."
-                        : "Select a speaker to review aliases and their turns."
+                ContentUnavailableView(
+                    "Select a Speaker",
+                    systemImage: "person.crop.square",
+                    description: Text(
+                        BuildFeatures.nameSuggestionsEnabled
+                            ? "Choose a speaker to review aliases and suggestion context."
+                            : "Choose a speaker to review aliases and turns."
+                    )
                 )
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -662,24 +682,7 @@ private struct TranscriptSpeakerTurnsCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            TranscriptWorkspacePanel(
-                title: "Speaker Review",
-                subtitle: subtitle
-            ) {
-                if selectedSpeaker != nil {
-                    Picker("Review Mode", selection: $focusMode) {
-                        ForEach(TranscriptSpeakerFocusMode.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                } else {
-                    Text("Select a speaker to review their clips and reassign misattributed turns.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
+            reviewModeControls
 
             TranscriptSegmentBrowser(
                 title: browserTitle,
@@ -702,29 +705,45 @@ private struct TranscriptSpeakerTurnsCard: View {
         }
     }
 
-    private var subtitle: String {
-        if focusMode == .selectedSpeaker, let selectedSpeaker {
-            return "Play only \(selectedSpeaker.alias)'s clips, then reassign any turn that was attributed to the wrong speaker."
+    @ViewBuilder
+    private var reviewModeControls: some View {
+        if selectedSpeaker != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Review Mode")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                reviewModePicker
+                    .frame(maxWidth: 320, alignment: .leading)
+            }
         }
-        if let selectedSpeaker {
-            return "Keep transcript order intact while visually emphasizing \(selectedSpeaker.alias)'s turns."
+    }
+
+    private var reviewModePicker: some View {
+        Picker("Review Mode", selection: $focusMode) {
+            ForEach(TranscriptSpeakerFocusMode.allCases) { mode in
+                Text(mode.rawValue).tag(mode)
+            }
         }
-        return "Choose a speaker to review their clips in isolation or against the full transcript."
+        .labelsHidden()
+        .pickerStyle(.segmented)
     }
 
     private var browserTitle: String {
         if focusMode == .selectedSpeaker, let selectedSpeaker {
             return "\(selectedSpeaker.alias) Clips"
         }
-        return "Conversation Context"
+        if selectedSpeaker != nil {
+            return "Conversation Context"
+        }
+        return "Speaker Review"
     }
 
     private var browserSubtitle: String {
         if focusMode == .selectedSpeaker, let selectedSpeaker {
-            return "Only clips currently assigned to \(selectedSpeaker.alias) are shown here."
+            return "Review clips currently assigned to \(selectedSpeaker.alias)."
         }
         if let selectedSpeaker {
-            return "Full transcript order stays visible while \(selectedSpeaker.alias)'s clips remain emphasized."
+            return "Keep transcript order visible while emphasizing \(selectedSpeaker.alias)'s clips."
         }
         return "Select a speaker to start review."
     }
@@ -744,95 +763,89 @@ private struct TranscriptSpeakerInspectorCard: View {
     let onUpdateSpeaker: (String?, UUID) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Selected Clip")
-                    .font(.headline)
-                Text("Playback and reassignment stay attached to the clip you selected.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
+        TranscriptInspectorPanel(
+            title: "Clip Reassignment",
+            subtitle: "Review playback and update the selected clip’s speaker."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    TranscriptSegmentDetailBlock(
+                        title: "Speaker",
+                        value: transcriptSpeakerDisplay(for: selectedSegment, in: transcript)
+                    )
 
-            HStack(alignment: .top, spacing: 12) {
-                TranscriptSegmentDetailBlock(
-                    title: "Speaker",
-                    value: transcriptSpeakerDisplay(for: selectedSegment, in: transcript)
-                )
+                    TranscriptSegmentDetailBlock(
+                        title: "Timestamp",
+                        value: transcriptTimestampText(for: selectedSegment)
+                    )
+                }
 
-                TranscriptSegmentDetailBlock(
-                    title: "Timestamp",
-                    value: transcriptTimestampText(for: selectedSegment)
-                )
-            }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Playback")
+                        .font(.subheadline.weight(.semibold))
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Playback")
-                    .font(.subheadline.weight(.semibold))
+                    if !playback.audioAvailable {
+                        Text("Session audio is unavailable, so playback is off.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
 
-                if !playback.audioAvailable {
-                    Text("Session audio is not available, so playback is disabled.")
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            TranscriptPlaybackControls(
+                                canPlaySelectedSegment: playback.canPlaySelectedSegment,
+                                isPlaying: playback.isPlaying,
+                                onPlayClip: playback.playClip,
+                                onPlayWithContext: playback.playWithContext,
+                                onStopPlayback: playback.stopPlayback
+                            )
+                            Spacer(minLength: 0)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            TranscriptPlaybackControls(
+                                canPlaySelectedSegment: playback.canPlaySelectedSegment,
+                                isPlaying: playback.isPlaying,
+                                onPlayClip: playback.playClip,
+                                onPlayWithContext: playback.playWithContext,
+                                onStopPlayback: playback.stopPlayback
+                            )
+                        }
+                    }
+
+                    Text("Play With Context adds 2 seconds on each side when available.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        TranscriptPlaybackControls(
-                            canPlaySelectedSegment: playback.canPlaySelectedSegment,
-                            isPlaying: playback.isPlaying,
-                            onPlayClip: playback.playClip,
-                            onPlayWithContext: playback.playWithContext,
-                            onStopPlayback: playback.stopPlayback
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Speaker")
+                        .font(.subheadline.weight(.semibold))
+
+                    Picker(
+                        "Speaker",
+                        selection: Binding<String?>(
+                            get: {
+                                TranscriptState.canonicalSpeakerLabel(selectedSegment.speakerLabel)
+                            },
+                            set: { newValue in
+                                onUpdateSpeaker(newValue, selectedSegment.id)
+                            }
                         )
-                        Spacer(minLength: 0)
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        TranscriptPlaybackControls(
-                            canPlaySelectedSegment: playback.canPlaySelectedSegment,
-                            isPlaying: playback.isPlaying,
-                            onPlayClip: playback.playClip,
-                            onPlayWithContext: playback.playWithContext,
-                            onStopPlayback: playback.stopPlayback
-                        )
-                    }
-                }
-
-                Text("Context playback adds 2 seconds before and after the selected clip when audio bounds allow it.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Speaker Reassignment")
-                    .font(.subheadline.weight(.semibold))
-
-                Picker(
-                    "Speaker",
-                    selection: Binding<String?>(
-                        get: {
-                            TranscriptState.canonicalSpeakerLabel(selectedSegment.speakerLabel)
-                        },
-                        set: { newValue in
-                            onUpdateSpeaker(newValue, selectedSegment.id)
+                    ) {
+                        ForEach(transcript.orderedSpeakerLabels, id: \.self) { label in
+                            Text(speakerOptionLabel(for: label))
+                                .tag(Optional(label))
                         }
-                    )
-                ) {
-                    ForEach(transcript.orderedSpeakerLabels, id: \.self) { label in
-                        Text(speakerOptionLabel(for: label))
-                            .tag(Optional(label))
                     }
-                }
-                .pickerStyle(.menu)
+                    .pickerStyle(.menu)
 
-                Text("This changes the selected clip’s canonical speaker label. Consolidation remains a separate speaker-management action.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    Text("This updates the selected clip’s canonical speaker label.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .totalRecStaticRoundedRect(cornerRadius: 14)
     }
 
     private func speakerOptionLabel(for label: String) -> String {
@@ -860,29 +873,6 @@ private struct TranscriptSuggestionOverlay: View {
             .totalRecGlassPanel(cornerRadius: 16, tint: TotalRecGlass.transcriptViolet)
             .glassEffectTransition(.materialize)
         }
-    }
-}
-
-private struct TranscriptWorkspacePanel<Content: View>: View {
-    let title: String
-    let subtitle: String
-    @ViewBuilder let content: () -> Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.headline)
-                Text(subtitle)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            content()
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .totalRecStaticPanel(cornerRadius: 16)
     }
 }
 

@@ -34,56 +34,14 @@ struct TranscriptSegmentBrowser<InlineInspector: View>: View {
     @StateObject private var playbackController = TranscriptPlaybackController()
 
     var body: some View {
-        TranscriptSegmentBrowserPanel(title: title, subtitle: subtitle) {
+        TranscriptSurfacePanel(title: title, subtitle: subtitle) {
             if segments.isEmpty {
                 Text(emptyMessage)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
-                            ForEach(segments) { segment in
-                                Button {
-                                    handleSelection(segment)
-                                } label: {
-                                    TranscriptSegmentRow(
-                                        segment: segment,
-                                        speakerDisplay: transcript.hasSpeakerLabels ? transcriptSpeakerDisplay(for: segment, in: transcript) : nil,
-                                        isSelected: playbackController.selectedSegmentID == segment.id,
-                                        isActive: playbackController.activeSegmentID == segment.id,
-                                        isEmphasized: isSegmentEmphasized(segment)
-                                    )
-                                }
-                                .buttonStyle(.plain)
-                                .id(segment.id)
-
-                                if playbackController.selectedSegmentID == segment.id {
-                                    inlineInspector(
-                                        segment,
-                                        TranscriptSegmentBrowserPlaybackState(
-                                            canPlaySelectedSegment: playbackController.canPlaySelectedSegment,
-                                            isPlaying: playbackController.isPlaying,
-                                            audioAvailable: audioURL != nil,
-                                            playClip: playbackController.playSelectedClip,
-                                            playWithContext: playbackController.playSelectedClipWithContext,
-                                            stopPlayback: playbackController.pause
-                                        )
-                                    )
-                                    .id(inspectorAnchorID(for: segment.id))
-                                }
-                            }
-                        }
-                    }
-                    .frame(minHeight: 420)
-                    .onChange(of: playbackController.selectedSegmentID) { _, newValue in
-                        guard let newValue else { return }
-                        DispatchQueue.main.async {
-                            proxy.scrollTo(inspectorAnchorID(for: newValue), anchor: .center)
-                        }
-                    }
-                }
+                segmentWorkspace
             }
         }
         .frame(minWidth: 460, maxWidth: .infinity, alignment: .topLeading)
@@ -111,12 +69,101 @@ struct TranscriptSegmentBrowser<InlineInspector: View>: View {
         segments.map(\.id)
     }
 
-    private func inspectorAnchorID(for segmentID: UUID) -> String {
-        "segment-inspector-\(segmentID.uuidString)"
+    private var selectedSegmentBinding: Binding<UUID?> {
+        Binding(
+            get: { playbackController.selectedSegmentID },
+            set: { newValue in
+                if let newValue {
+                    playbackController.selectSegment(newValue)
+                } else {
+                    playbackController.stopAndClearSelection()
+                }
+            }
+        )
+    }
+
+    private var playbackState: TranscriptSegmentBrowserPlaybackState {
+        TranscriptSegmentBrowserPlaybackState(
+            canPlaySelectedSegment: playbackController.canPlaySelectedSegment,
+            isPlaying: playbackController.isPlaying,
+            audioAvailable: audioURL != nil,
+            playClip: playbackController.playSelectedClip,
+            playWithContext: playbackController.playSelectedClipWithContext,
+            stopPlayback: playbackController.pause
+        )
     }
 
     private func updatePlaybackSession() {
         playbackController.updateSession(audioURL: audioURL, audioDuration: audioDuration, transcript: transcript)
+    }
+
+    @ViewBuilder
+    private var segmentWorkspace: some View {
+        #if os(macOS)
+        HSplitView {
+            segmentList
+                .frame(minWidth: 320, idealWidth: 380, maxWidth: 440, maxHeight: .infinity, alignment: .topLeading)
+
+            segmentInspector
+                .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(minHeight: 420, alignment: .topLeading)
+        #else
+        VStack(alignment: .leading, spacing: 14) {
+            segmentList
+                .frame(minHeight: 260)
+
+            segmentInspector
+        }
+        .frame(minHeight: 420)
+        #endif
+    }
+
+    private var segmentList: some View {
+        TranscriptListContainer {
+            List(selection: selectedSegmentBinding) {
+                ForEach(segments) { segment in
+                    TranscriptSegmentRow(
+                        segment: segment,
+                        speakerDisplay: transcript.hasSpeakerLabels ? transcriptSpeakerDisplay(for: segment, in: transcript) : nil,
+                        isSelected: playbackController.selectedSegmentID == segment.id,
+                        isActive: playbackController.activeSegmentID == segment.id,
+                        isEmphasized: isSegmentEmphasized(segment)
+                    )
+                    .tag(Optional(segment.id))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        handleSelection(segment)
+                    }
+                    .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+        }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private var segmentInspector: some View {
+        if let selectedSegment = playbackController.selectedSegment {
+            inlineInspector(selectedSegment, playbackState)
+        } else {
+            TranscriptInspectorPanel(
+                title: mode == .speakerEditing ? "Clip Inspector" : "Text Inspector",
+                subtitle: mode == .speakerEditing
+                    ? "Select a clip to review playback and update its speaker."
+                    : "Select a clip to review playback and edit its text."
+            ) {
+                ContentUnavailableView(
+                    "Select a Clip",
+                    systemImage: mode == .speakerEditing ? "person.wave.2" : "text.cursor",
+                    description: Text("Choose a clip from the list to start review.")
+                )
+            }
+        }
     }
 
     private func handleSelection(_ segment: TranscriptSegment) {
@@ -175,17 +222,16 @@ struct TranscriptSegmentDetailBlock: View {
     let value: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
+        TranscriptInsetPanel {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .totalRecStaticRoundedRect(cornerRadius: 12)
     }
 }
 
@@ -197,16 +243,23 @@ private struct TranscriptSegmentRow: View {
     let isEmphasized: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(transcriptTimestampText(for: segment))
                     .font(.caption.weight(.semibold))
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
 
-                Spacer()
+                if let speakerDisplay {
+                    Text(speakerDisplay)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                }
+
+                Spacer(minLength: 0)
 
                 if isActive {
-                    Label("Playing · Click Again To Stop", systemImage: "speaker.wave.2.fill")
+                    Label("Playing", systemImage: "speaker.wave.2.fill")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.successGreen))
                 } else if segment.start == nil {
@@ -216,21 +269,15 @@ private struct TranscriptSegmentRow: View {
                 }
             }
 
-            if let speakerDisplay {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(speakerDisplay)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                    Spacer()
-                }
-            }
-
             Text(segment.text)
+                .font(.body)
+                .lineSpacing(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .foregroundStyle(.primary)
                 .multilineTextAlignment(.leading)
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(backgroundColor, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
@@ -247,7 +294,7 @@ private struct TranscriptSegmentRow: View {
         if isSelected {
             return Color.accentColor.opacity(0.10)
         }
-        return TranscriptSegmentBrowserColors.segmentBackground
+        return .clear
     }
 
     private var borderColor: Color {
@@ -257,30 +304,131 @@ private struct TranscriptSegmentRow: View {
         if isSelected {
             return Color.accentColor.opacity(0.35)
         }
-        return TranscriptSegmentBrowserColors.segmentBorder
+        return Color.clear
     }
 }
 
-private struct TranscriptSegmentBrowserPanel<Content: View>: View {
+struct TranscriptSurfacePanel<Content: View>: View {
     let title: String
-    let subtitle: String
+    let subtitle: String?
     @ViewBuilder let content: () -> Content
 
+    init(
+        title: String,
+        subtitle: String? = nil,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.content = content
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+
+        return VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(.headline)
-                Text(subtitle)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             content()
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .totalRecStaticPanel(cornerRadius: 16)
+        .background(TranscriptSurfaceColors.panelBackground, in: shape)
+        .overlay {
+            shape.stroke(TranscriptSurfaceColors.panelBorder, lineWidth: 1)
+        }
+    }
+}
+
+struct TranscriptInsetPanel<Content: View>: View {
+    let cornerRadius: CGFloat
+    @ViewBuilder let content: () -> Content
+
+    init(
+        cornerRadius: CGFloat = 12,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.cornerRadius = cornerRadius
+        self.content = content
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        return content()
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(TranscriptSurfaceColors.detailBackground, in: shape)
+            .overlay {
+                shape.stroke(TranscriptSurfaceColors.detailBorder, lineWidth: 1)
+            }
+    }
+}
+
+struct TranscriptInspectorPanel<Content: View>: View {
+    let title: String
+    let subtitle: String?
+    @ViewBuilder let content: () -> Content
+
+    init(
+        title: String,
+        subtitle: String? = nil,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.content = content
+    }
+
+    var body: some View {
+        TranscriptInsetPanel(cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+
+                    if let subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                content()
+            }
+        }
+    }
+}
+
+struct TranscriptListContainer<Content: View>: View {
+    let cornerRadius: CGFloat
+    @ViewBuilder let content: () -> Content
+
+    init(
+        cornerRadius: CGFloat = 14,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.cornerRadius = cornerRadius
+        self.content = content
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        return content()
+            .background(TranscriptSurfaceColors.detailBackground, in: shape)
+            .overlay {
+                shape.stroke(TranscriptSurfaceColors.detailBorder, lineWidth: 1)
+            }
     }
 }
 
@@ -295,8 +443,8 @@ struct TranscriptPlaybackControls: View {
         Group {
             TranscriptPlaybackTransportButton(
                 tooltip: "Play the selected clip only.",
-                backgroundColor: TranscriptSegmentBrowserColors.playButtonBackground,
-                symbolColor: TranscriptSegmentBrowserColors.playButtonSymbol,
+                backgroundColor: TranscriptSurfaceColors.playButtonBackground,
+                symbolColor: TranscriptSurfaceColors.playButtonSymbol,
                 isEnabled: canPlaySelectedSegment,
                 action: onPlayClip
             ) {
@@ -305,16 +453,16 @@ struct TranscriptPlaybackControls: View {
             }
 
             TranscriptContextPlaybackButton(
-                backgroundColor: TranscriptSegmentBrowserColors.playButtonBackground,
-                symbolColor: TranscriptSegmentBrowserColors.playButtonSymbol,
+                backgroundColor: TranscriptSurfaceColors.playButtonBackground,
+                symbolColor: TranscriptSurfaceColors.playButtonSymbol,
                 isEnabled: canPlaySelectedSegment,
                 action: onPlayWithContext
             )
 
             TranscriptPlaybackTransportButton(
                 tooltip: "Stop playback and keep this segment selected.",
-                backgroundColor: TranscriptSegmentBrowserColors.stopButtonBackground,
-                symbolColor: TranscriptSegmentBrowserColors.stopButtonSymbol,
+                backgroundColor: TranscriptSurfaceColors.stopButtonBackground,
+                symbolColor: TranscriptSurfaceColors.stopButtonSymbol,
                 isEnabled: isPlaying,
                 action: onStopPlayback
             ) {
@@ -440,34 +588,22 @@ private struct TranscriptPlaybackTooltipBubble: View {
     }
 }
 
-private enum TranscriptSegmentBrowserColors {
+enum TranscriptSurfaceColors {
     #if os(macOS)
     static let panelBackground = Color(nsColor: .controlBackgroundColor)
     static let panelBorder = Color(nsColor: .separatorColor).opacity(0.85)
-    static let segmentBackground = Color(nsColor: .textBackgroundColor)
-    static let segmentBorder = Color(nsColor: .separatorColor).opacity(0.68)
     static let detailBackground = Color(nsColor: .textBackgroundColor)
     static let detailBorder = Color(nsColor: .separatorColor).opacity(0.72)
-    static let selectionStripBackground = Color(nsColor: .windowBackgroundColor)
-    static let selectionStripBorder = Color(nsColor: .separatorColor).opacity(0.8)
     #elseif os(iOS)
     static let panelBackground = Color(uiColor: .secondarySystemBackground)
     static let panelBorder = Color(uiColor: .separator).opacity(0.6)
-    static let segmentBackground = Color(uiColor: .systemBackground)
-    static let segmentBorder = Color(uiColor: .separator).opacity(0.48)
     static let detailBackground = Color(uiColor: .systemBackground)
     static let detailBorder = Color(uiColor: .separator).opacity(0.52)
-    static let selectionStripBackground = Color(uiColor: .tertiarySystemBackground)
-    static let selectionStripBorder = Color(uiColor: .separator).opacity(0.56)
     #else
     static let panelBackground = Color.gray.opacity(0.10)
     static let panelBorder = Color.gray.opacity(0.22)
-    static let segmentBackground = Color.gray.opacity(0.03)
-    static let segmentBorder = Color.gray.opacity(0.18)
     static let detailBackground = Color.gray.opacity(0.03)
     static let detailBorder = Color.gray.opacity(0.18)
-    static let selectionStripBackground = Color.gray.opacity(0.08)
-    static let selectionStripBorder = Color.gray.opacity(0.2)
     #endif
     static let playButtonBackground = Color(red: 0.63, green: 0.90, blue: 0.67)
     static let playButtonSymbol = Color(red: 0.09, green: 0.34, blue: 0.14)

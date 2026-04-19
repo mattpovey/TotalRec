@@ -19,6 +19,13 @@ struct TotalRecApp: App {
         }
         .defaultSize(width: 1100, height: 720)
 
+#if os(macOS)
+        Settings {
+            TotalRecSettingsView()
+                .environmentObject(appModel)
+        }
+#endif
+
         MenuBarExtra {
             MenuBarRecorderView()
                 .environmentObject(appModel)
