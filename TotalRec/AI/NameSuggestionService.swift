@@ -73,11 +73,15 @@ struct NameSuggestionService {
 
     let maxExcerptLength: Int
 
-    init(maxExcerptLength: Int = 480) {
+    nonisolated init(maxExcerptLength: Int = 480) {
         self.maxExcerptLength = maxExcerptLength
     }
 
     func suggestAliases(for speakers: [SpeakerExcerpt]) async throws -> [Suggestion] {
+        guard BuildFeatures.nameSuggestionsEnabled else {
+            return []
+        }
+
         guard !speakers.isEmpty else {
             throw ServiceError.noSpeakers
         }
@@ -92,26 +96,27 @@ struct NameSuggestionService {
 
         let provider = NameSuggestionProvider(
             rawValue: AIConfigManager.shared.configuration.nameSuggestionProvider.lowercased()
-        ) ?? .openAI
+        ) ?? NameSuggestionProvider.buildDefault
 
         switch provider {
         case .disabled:
             print("[NameSuggestions][Service] Provider disabled. Using heuristic aliases for labels: \(speakers.map { $0.label })")
             return heuristicallySuggestAliases(for: speakers)
-        case .openAI:
-            print("[NameSuggestions][Service] Requesting OpenAI alias suggestions for labels: \(speakers.map { $0.label })")
+        case .openAI, .sambaNova:
+            let llmProvider = provider.llmProvider ?? .openAI
+            print("[NameSuggestions][Service] Requesting \(llmProvider.displayName) alias suggestions for labels: \(speakers.map { $0.label })")
             let labels = speakers.map { $0.label }
             let transcript = makeTranscript(from: speakers)
             let response: [String: String]
             do {
-                response = try await suggestWithOpenAI(labels: labels, transcript: transcript)
+                response = try await suggestWithProvider(labels: labels, transcript: transcript, provider: llmProvider)
             } catch {
                 print("[NameSuggestions][Service] ERROR: \(error.localizedDescription)")
                 throw error
             }
 
             guard !response.isEmpty else {
-                print("[NameSuggestions][Service] OpenAI returned empty alias response; falling back to heuristics.")
+                print("[NameSuggestions][Service] Provider returned empty alias response; falling back to heuristics.")
                 return heuristicallySuggestAliases(for: speakers)
             }
 
@@ -148,105 +153,72 @@ struct NameSuggestionService {
     }
 
     func suggestNames(labels: [String], transcript: String) async throws -> [String: String] {
+        guard BuildFeatures.nameSuggestionsEnabled else { return [:] }
         guard !labels.isEmpty else { return [:] }
 
         let provider = NameSuggestionProvider(
             rawValue: AIConfigManager.shared.configuration.nameSuggestionProvider.lowercased()
-        ) ?? .openAI
+        ) ?? NameSuggestionProvider.buildDefault
         print("[NameSuggestions][Service] suggestNames provider=\(provider.rawValue) labels=\(labels.count) transcriptChars=\(transcript.count)")
 
         switch provider {
         case .disabled:
             print("[NameSuggestions][Service] Provider disabled; returning empty suggestions.")
             return [:]
-        case .openAI:
-            let result = try await suggestWithOpenAI(labels: labels, transcript: transcript)
-            print("[NameSuggestions][Service] OpenAI returned \(result.count) name suggestions.")
+        case .openAI, .sambaNova:
+            let llmProvider = provider.llmProvider ?? .openAI
+            let result = try await suggestWithProvider(labels: labels, transcript: transcript, provider: llmProvider)
+            print("[NameSuggestions][Service] \(llmProvider.displayName) returned \(result.count) name suggestions.")
             return result
         }
     }
 
-    // MARK: - OpenAI
-
-    private struct ChatCompletionRequest: Encodable {
-        struct Message: Encodable {
-            let role: String
-            let content: String
-        }
-
-        let model: String
-        let messages: [Message]
-    }
-
-    private struct ChatCompletionResponse: Decodable {
-        struct Choice: Decodable {
-            struct Message: Decodable {
-                let content: String
-            }
-            let message: Message
-        }
-        let choices: [Choice]
-    }
+    // MARK: - Provider-backed suggestions
 
     private struct APISuggestion: Decodable {
         let label: String
         let name: String
     }
 
-    private func suggestWithOpenAI(labels: [String], transcript: String) async throws -> [String: String] {
-        guard let apiKey = AIConfigManager.shared.openAIKey(), !apiKey.isEmpty else {
-            print("[NameSuggestions][Service] ERROR: Missing OpenAI API key")
-            throw ServiceError.missingAPIKey
-        }
-
-        guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else {
-            throw ServiceError.invalidResponse
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-
-        let model = "gpt-5-mini"
-        let prompt = buildPrompt(labels: labels, transcript: transcript)
-        print("[NameSuggestions][Service] OpenAI prompt length: \(prompt.count) characters for labels: \(labels)")
-        let systemMessage = ChatCompletionRequest.Message(
-            role: "system",
-            content: "You rename diarized speaker labels to human-friendly names. Return only JSON as instructed."
-        )
-        let userMessage = ChatCompletionRequest.Message(role: "user", content: prompt)
-        let body = ChatCompletionRequest(
-            model: model,
-            messages: [systemMessage, userMessage]
-        )
-        request.httpBody = try JSONEncoder().encode(body)
-        print("[NameSuggestions][Service] POST \(url.absoluteString) model=\(model) labels=\(labels.count)")
-
-        let dataResponse: (Data, URLResponse)
+    private func suggestWithProvider(
+        labels: [String],
+        transcript: String,
+        provider: LLMProvider
+    ) async throws -> [String: String] {
+        let resolved: LLMResolvedConfiguration
         do {
-            dataResponse = try await URLSession.shared.data(for: request)
+            resolved = try AIConfigManager.shared.resolvedNameSuggestionConfiguration()
+        } catch {
+            if case AIConfigManager.ConfigurationError.missingAPIKey = error {
+                print("[NameSuggestions][Service] ERROR: Missing \(provider.displayName) API key")
+                throw ServiceError.missingAPIKey
+            }
+            throw error
+        }
+
+        let prompt = buildPrompt(labels: labels, transcript: transcript)
+        print("[NameSuggestions][Service] \(provider.displayName) prompt length: \(prompt.count) characters for labels: \(labels)")
+        let message: String
+        do {
+            message = try await ConversationTransport().generateText(
+                TextGenerationRequest(
+                    provider: resolved.provider,
+                    baseURL: resolved.baseURL,
+                    apiKey: resolved.apiKey,
+                    systemInstruction: "You rename diarized speaker labels to human-friendly names. Return only JSON as instructed.",
+                    prompt: prompt,
+                    inputText: transcript,
+                    modelID: resolved.modelID,
+                    preferStreaming: false,
+                    outputExpectations: "Return only a JSON array of label/name pairs."
+                ),
+                onEvent: { _ in }
+            )
         } catch {
             print("[NameSuggestions][Service] ERROR: \(error.localizedDescription)")
             throw error
         }
-        let (data, response) = dataResponse
-        guard let http = response as? HTTPURLResponse else {
-            print("[NameSuggestions][Service] ERROR: Missing HTTPURLResponse")
-            throw ServiceError.invalidResponse
-        }
-        guard 200..<300 ~= http.statusCode else {
-            let bodyString = String(data: data, encoding: .utf8) ?? "<no body>"
-            print("[NameSuggestions][Service] OpenAI HTTP error \(http.statusCode): \(bodyString)")
-            throw ServiceError.httpError(http.statusCode, bodyString)
-        }
-
-        let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
-        guard let message = decoded.choices.first?.message.content else {
-            print("[NameSuggestions][Service] ERROR: Empty choices in response")
-            throw ServiceError.invalidResponse
-        }
-        print("[NameSuggestions][Service] OpenAI response body length: \(message.count)")
+        print("[NameSuggestions][Service] \(provider.displayName) response body length: \(message.count)")
 
         return try parseSuggestions(from: message)
     }

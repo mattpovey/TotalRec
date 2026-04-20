@@ -24,7 +24,7 @@ struct TranscriptFormatter {
         transcript.segments.map { segment in
             let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return "" }
-            if let raw = segment.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            if let raw = TranscriptState.canonicalSpeakerLabel(segment.speakerLabel) {
                 return "\(raw): \(text)"
             }
             return text
@@ -45,7 +45,7 @@ struct TranscriptFormatter {
     }
 
     private func displaySpeaker(for segment: TranscriptSegment) -> String? {
-        guard let raw = segment.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+        guard let raw = TranscriptState.canonicalSpeakerLabel(segment.speakerLabel) else {
             return nil
         }
         return transcript.alias(for: raw)
@@ -70,36 +70,120 @@ struct TranscriptRenderer {
         formatter.joinedPlainText()
     }
 
-    func json(pretty: Bool = true) throws -> Data {
-        struct JSONSegment: Codable {
-            let speaker: String?
-            let rawSpeaker: String?
-            let text: String
-            let start: TimeInterval?
-            let end: TimeInterval?
-        }
-        struct Payload: Codable {
-            let segments: [JSONSegment]
-            let speakerAliases: [String: String]
-            let combinedText: String
+    func markdown() -> String {
+        var sections: [String] = []
+
+        if transcript.hasSpeakerLabels {
+            let aliasLines = transcript.orderedSpeakerLabels.map { label in
+                let alias = transcript.alias(for: label)
+                return "- `\(label)`: \(alias)"
+            }
+            if !aliasLines.isEmpty {
+                sections.append(
+                    [
+                        "# Speaker Aliases",
+                        aliasLines.joined(separator: "\n")
+                    ].joined(separator: "\n\n")
+                )
+            }
         }
 
-        let segments = transcript.segments.map { segment -> JSONSegment in
-            let raw = segment.speakerLabel
-            let alias = raw.flatMap { label in transcript.alias(for: label) }
-            return JSONSegment(
-                speaker: alias,
-                rawSpeaker: raw,
-                text: segment.text,
-                start: segment.start,
-                end: segment.end
+        let transcriptLines = transcript.segments.compactMap { segment -> String? in
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            if let speaker = TranscriptState.canonicalSpeakerLabel(segment.speakerLabel) {
+                return "**\(transcript.alias(for: speaker)):** \(text)"
+            }
+            return text
+        }
+
+        let transcriptBody: String
+        if transcriptLines.isEmpty {
+            transcriptBody = transcript.rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            transcriptBody = transcriptLines.joined(separator: "\n\n")
+        }
+
+        if !transcriptBody.isEmpty {
+            sections.append(
+                [
+                    "# Transcript",
+                    transcriptBody
+                ].joined(separator: "\n\n")
             )
         }
 
+        return sections.joined(separator: "\n\n")
+    }
+
+    func json(pretty: Bool = true) throws -> Data {
+        struct JSONSpeaker: Codable {
+            let id: String
+            let displayName: String
+        }
+
+        struct JSONTimecode: Codable {
+            let start: TimeInterval?
+            let end: TimeInterval?
+        }
+
+        struct JSONSegment: Codable {
+            let id: UUID?
+            let speaker: JSONSpeaker?
+            let timecode: JSONTimecode?
+            let text: String
+        }
+
+        struct Payload: Codable {
+            let schemaVersion: Int
+            let speakers: [JSONSpeaker]
+            let segments: [JSONSegment]
+        }
+
+        let speakers = transcript.orderedSpeakerLabels.map { label in
+            JSONSpeaker(id: label, displayName: transcript.alias(for: label))
+        }
+
+        let segments: [JSONSegment]
+        if transcript.segments.isEmpty {
+            let rawText = transcript.rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if rawText.isEmpty {
+                segments = []
+            } else {
+                segments = [
+                    JSONSegment(
+                        id: nil,
+                        speaker: nil,
+                        timecode: nil,
+                        text: rawText
+                    )
+                ]
+            }
+        } else {
+            segments = transcript.segments.compactMap { segment in
+                let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return nil }
+
+                let speaker = TranscriptState.canonicalSpeakerLabel(segment.speakerLabel).map {
+                    JSONSpeaker(id: $0, displayName: transcript.alias(for: $0))
+                }
+                let timecode = (segment.start != nil || segment.end != nil)
+                    ? JSONTimecode(start: segment.start, end: segment.end)
+                    : nil
+
+                return JSONSegment(
+                    id: segment.id,
+                    speaker: speaker,
+                    timecode: timecode,
+                    text: text
+                )
+            }
+        }
+
         let payload = Payload(
-            segments: segments,
-            speakerAliases: transcript.speakerAliases,
-            combinedText: formatter.joinedPlainText()
+            schemaVersion: 2,
+            speakers: speakers,
+            segments: segments
         )
         let encoder = JSONEncoder()
         if pretty {

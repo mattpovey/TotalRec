@@ -16,7 +16,7 @@ private extension OpenAITranscriber {
 }
 
 struct OpenAITranscriber {
-    struct KnownSpeaker {
+    struct KnownSpeaker: Sendable {
         let name: String
         let reference: String?
         init(name: String, reference: String? = nil) {
@@ -103,6 +103,35 @@ struct OpenAITranscriber {
     
     private func logError(_ message: String) {
         print("[OpenAITranscriber] ERROR: \(message)")
+    }
+
+    private func mimeType(for audioURL: URL) -> String {
+        switch audioURL.pathExtension.lowercased() {
+        case "wav":
+            return "audio/wav"
+        case "m4a":
+            return "audio/m4a"
+        case "mp3":
+            return "audio/mpeg"
+        case "aac":
+            return "audio/aac"
+        case "flac":
+            return "audio/flac"
+        case "ogg":
+            return "audio/ogg"
+        case "webm":
+            return "audio/webm"
+        case "mp4", "mpeg", "mpga":
+            return "audio/\(audioURL.pathExtension.lowercased())"
+        default:
+            return "application/octet-stream"
+        }
+    }
+
+    private func normalizedServerChunkingStrategy(from value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed == "auto" ? "auto" : nil
     }
     
     private func normalizeReferenceToDataURL(_ ref: String, onProgress: ((String) -> Void)?) -> String? {
@@ -226,7 +255,9 @@ struct OpenAITranscriber {
 
         // Required fields
         appendFormField(name: "model", value: "gpt-4o-transcribe-diarize")
-        appendFormField(name: "chunking_strategy", value: chunkingStrategy)
+        if let serverChunkingStrategy = normalizedServerChunkingStrategy(from: chunkingStrategy) {
+            appendFormField(name: "chunking_strategy", value: serverChunkingStrategy)
+        }
         // Removed diarize and speaker_labels fields
         appendFormField(name: "response_format", value: "diarized_json")
 
@@ -237,20 +268,18 @@ struct OpenAITranscriber {
                 onProgress?("Known speakers limited to 4; truncating to first 4.")
             }
             // Names from all provided speakers (non-empty names assumed by caller)
-            let names = limited.map { $0.name }
-            // Try to normalize each reference; keep nil when not provided/convertible
-            let normalizedOptionals: [String?] = limited.map { spk in
-                if let r = spk.reference, let norm = normalizeReferenceToDataURL(r, onProgress: onProgress) { return norm }
-                return nil
+            let pairs: [(name: String, reference: String)] = limited.compactMap { speaker in
+                guard let ref = speaker.reference,
+                      let normalizedRef = normalizeReferenceToDataURL(ref, onProgress: onProgress) else {
+                    return nil
+                }
+                return (speaker.name, normalizedRef)
             }
-            // If every speaker has a valid reference (equal count), include references; else omit references entirely
-            let allHaveRefs = normalizedOptionals.allSatisfy { $0 != nil }
-            if !names.isEmpty { appendArrayField(name: "known_speaker_names", values: names) }
-            if allHaveRefs {
-                let refs = normalizedOptionals.compactMap { $0 }
-                appendArrayField(name: "known_speaker_references", values: refs)
-            } else if normalizedOptionals.contains(where: { $0 != nil }) {
-                onProgress?("Some known speaker references were provided but not all; omitting references to satisfy API requirements.")
+            if pairs.count == limited.count, !pairs.isEmpty {
+                appendArrayField(name: "known_speaker_names", values: pairs.map(\.name))
+                appendArrayField(name: "known_speaker_references", values: pairs.map(\.reference))
+            } else if !pairs.isEmpty || limited.contains(where: { !($0.reference?.isEmpty ?? true) }) {
+                onProgress?("Known speakers require valid reference clips for every provided name; omitting known speaker hints to avoid API errors.")
             }
         } else {
             let namesRaw = (knownSpeakerNames ?? [])
@@ -258,14 +287,12 @@ struct OpenAITranscriber {
             if !namesRaw.isEmpty || !refsRaw.isEmpty {
                 let limitedNames = Array(namesRaw.prefix(4))
                 let limitedRefsRaw = Array(refsRaw.prefix(4))
-                // Normalize any provided refs; entries that cannot be normalized become nil
-                let normalizedRefs: [String?] = limitedRefsRaw.map { normalizeReferenceToDataURL($0, onProgress: onProgress) }
-                // Only include references if we have exactly one per name and none are nil
-                if !limitedNames.isEmpty { appendArrayField(name: "known_speaker_names", values: limitedNames) }
-                if normalizedRefs.count == limitedNames.count && normalizedRefs.allSatisfy({ $0 != nil }) {
-                    appendArrayField(name: "known_speaker_references", values: normalizedRefs.compactMap { $0 })
-                } else if normalizedRefs.contains(where: { $0 != nil }) {
-                    onProgress?("Known speaker references are optional; since not all were provided/valid, they were omitted to avoid API errors.")
+                let normalizedRefs = limitedRefsRaw.compactMap { normalizeReferenceToDataURL($0, onProgress: onProgress) }
+                if normalizedRefs.count == limitedNames.count && !limitedNames.isEmpty {
+                    appendArrayField(name: "known_speaker_names", values: limitedNames)
+                    appendArrayField(name: "known_speaker_references", values: normalizedRefs)
+                } else if !limitedNames.isEmpty || !limitedRefsRaw.isEmpty {
+                    onProgress?("Known speakers require matching valid names and reference clips; omitting known speaker hints to avoid API errors.")
                 }
             }
         }
@@ -275,7 +302,7 @@ struct OpenAITranscriber {
             logError("Failed to read audio data from: \(audioURL.path)")
             completion(.failure(OpenAIError.encodingError)); return
         }
-        appendFileField(name: "file", filename: audioURL.lastPathComponent, mimeType: "audio/m4a", fileData: audioData)
+        appendFileField(name: "file", filename: audioURL.lastPathComponent, mimeType: mimeType(for: audioURL), fileData: audioData)
 
         // Close boundary
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)

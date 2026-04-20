@@ -13,17 +13,6 @@ TotalRec is a macOS app for recording system audio + microphone, transcribing th
 - Generate structured meeting notes (or use an optional custom prompt)
 - Export audio, transcripts (.txt, .json, .vtt, .srt), and notes (.txt, .json)
 
-## Screenshots
-
-- Capture tab
-  - ![Capture Tab](Screenshots/Capture.png)
-- Transcript tab
-  - ![Transcript Tab](Screenshots/Transcript.png)
-- Insights tab
-  - ![Insights Tab](Screenshots/Insights.png)
-- Settings sheet
-  - ![Settings](Screenshots/Settings.png)
-
 ## App Workflow
 The app is organized in three tabs:
 
@@ -64,16 +53,16 @@ Choose between:
 
 The current provider is shown in the header with a status badge. For OpenAI, the badge indicates whether an API key is configured.
 
-### OpenAI Key & Chunking
+### OpenAI Key & Upload Chunking
 - Enter your OpenAI API key in the app’s Settings sheet. It’s stored in Keychain.
-- Chunking strategy for long audio:
+- Upload chunking for long audio:
   - `Auto` (default): Splits long audio into multiple uploads
-  - `None`: Uploads the entire file at once but will fail if the audio is longer than permitted by the API
+  - `Single Upload`: Uploads the entire file at once and may fail for very large recordings
 
 ### Known Speakers (Optional)
 Provide up to 4 known speakers to improve diarization with OpenAI. Each entry requires both:
 - Name
-- Reference (either a `data:audio/...` URL or a remote URL)
+- Reference (either a `data:audio/...` URL or a local file path)
 
 If any row is partially filled, transcription with OpenAI will be disabled until the row is completed or cleared.
 
@@ -95,7 +84,7 @@ Adjust system and mic gain before mixing down the recorded MOV into M4A.
 ### Transcript
 - Transcribe Audio: runs the selected provider
   - Apple: streams partial text to the UI
-  - OpenAI: optionally uses chunking and known speakers
+  - OpenAI: optionally splits long recordings into multiple uploads and supports known speakers
 - Request Suggestions: asks the configured provider for speaker name ideas
 - Consolidate Consecutive Speakers: merges back-to-back turns by the same speaker
 - Export: save as .txt, .json, .vtt, or .srt

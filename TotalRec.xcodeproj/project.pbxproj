@@ -8,11 +8,28 @@
 
 /* Begin PBXBuildFile section */
 		11000A852ECA6AA6009177FE /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 11000A842ECA6AA6009177FE /* README.md */; };
+		220000000000000000000001 /* TranscriptStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000012 /* TranscriptStateTests.swift */; };
+		220000000000000000000002 /* TranscriptPlaybackControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000013 /* TranscriptPlaybackControllerTests.swift */; };
+		220000000000000000000003 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 220000000000000000000014 /* XCTest.framework */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		220000000000000000000041 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 111C55182EC26A5500EAA679 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 111C551F2EC26A5500EAA679;
+			remoteInfo = TotalRec;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		11000A842ECA6AA6009177FE /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		111C55202EC26A5500EAA679 /* TotalRec.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TotalRec.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		220000000000000000000011 /* TotalRecTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TotalRecTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		220000000000000000000012 /* TranscriptStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptStateTests.swift; sourceTree = "<group>"; };
+		220000000000000000000013 /* TranscriptPlaybackControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptPlaybackControllerTests.swift; sourceTree = "<group>"; };
+		220000000000000000000014 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -44,6 +61,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		220000000000000000000031 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				220000000000000000000003 /* XCTest.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -52,7 +77,9 @@
 			children = (
 				111C55222EC26A5500EAA679 /* TotalRec */,
 				111C55212EC26A5500EAA679 /* Products */,
+				220000000000000000000021 /* TotalRecTests */,
 				11000A842ECA6AA6009177FE /* README.md */,
+				220000000000000000000014 /* XCTest.framework */,
 			);
 			sourceTree = "<group>";
 		};
@@ -60,8 +87,18 @@
 			isa = PBXGroup;
 			children = (
 				111C55202EC26A5500EAA679 /* TotalRec.app */,
+				220000000000000000000011 /* TotalRecTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		220000000000000000000021 /* TotalRecTests */ = {
+			isa = PBXGroup;
+			children = (
+				220000000000000000000012 /* TranscriptStateTests.swift */,
+				220000000000000000000013 /* TranscriptPlaybackControllerTests.swift */,
+			);
+			path = TotalRecTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -89,6 +126,26 @@
 			productReference = 111C55202EC26A5500EAA679 /* TotalRec.app */;
 			productType = "com.apple.product-type.application";
 		};
+		220000000000000000000051 /* TotalRecTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 220000000000000000000063 /* Build configuration list for PBXNativeTarget "TotalRecTests" */;
+			buildPhases = (
+				220000000000000000000032 /* Sources */,
+				220000000000000000000031 /* Frameworks */,
+				220000000000000000000033 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				220000000000000000000042 /* PBXTargetDependency */,
+			);
+			name = TotalRecTests;
+			packageProductDependencies = (
+			);
+			productName = TotalRecTests;
+			productReference = 220000000000000000000011 /* TotalRecTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -101,6 +158,10 @@
 				TargetAttributes = {
 					111C551F2EC26A5500EAA679 = {
 						CreatedOnToolsVersion = 26.1;
+					};
+					220000000000000000000051 = {
+						CreatedOnToolsVersion = 26.1;
+						TestTargetID = 111C551F2EC26A5500EAA679;
 					};
 				};
 			};
@@ -119,6 +180,7 @@
 			projectRoot = "";
 			targets = (
 				111C551F2EC26A5500EAA679 /* TotalRec */,
+				220000000000000000000051 /* TotalRecTests */,
 			);
 		};
 /* End PBXProject section */
@@ -132,6 +194,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		220000000000000000000033 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -142,7 +211,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		220000000000000000000032 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				220000000000000000000002 /* TranscriptPlaybackControllerTests.swift in Sources */,
+				220000000000000000000001 /* TranscriptStateTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		220000000000000000000042 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 111C551F2EC26A5500EAA679 /* TotalRec */;
+			targetProxy = 220000000000000000000041 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		111C55292EC26A5600EAA679 /* Debug */ = {
@@ -270,6 +356,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -315,6 +402,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -355,6 +443,57 @@
 			};
 			name = Release;
 		};
+		220000000000000000000061 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = HL3W54MB57;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = sosayweall.TotalRecTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TotalRec.app/Contents/MacOS/TotalRec";
+				TEST_TARGET_NAME = TotalRec;
+			};
+			name = Debug;
+		};
+		220000000000000000000062 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = HL3W54MB57;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = sosayweall.TotalRecTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TotalRec.app/Contents/MacOS/TotalRec";
+				TEST_TARGET_NAME = TotalRec;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -372,6 +511,15 @@
 			buildConfigurations = (
 				111C552C2EC26A5600EAA679 /* Debug */,
 				111C552D2EC26A5600EAA679 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		220000000000000000000063 /* Build configuration list for PBXNativeTarget "TotalRecTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				220000000000000000000061 /* Debug */,
+				220000000000000000000062 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

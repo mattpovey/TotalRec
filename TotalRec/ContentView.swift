@@ -1,67 +1,38 @@
 import SwiftUI
 import AVFoundation
+import Speech
+import Combine
+import UniformTypeIdentifiers
 #if os(macOS)
 import AppKit
-import UniformTypeIdentifiers
+import CoreGraphics
+
+private func configureInitialWindowSize(for window: NSWindow) {
+    let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+    let targetHeight = max(min(visibleFrame.height * 0.55, 900), 520)
+    let targetWidth = min(max(visibleFrame.width * 0.55, 900), visibleFrame.width - 80)
+    let originX = visibleFrame.midX - targetWidth / 2
+    let originY = visibleFrame.midY - targetHeight / 2
+    let frame = NSRect(x: originX, y: originY, width: targetWidth, height: targetHeight)
+    window.setFrame(frame, display: true, animate: false)
+}
 #endif
 
 struct ContentView: View {
-    @State private var isRecording = false
-    @State private var permissionAlert = false
-    @State private var tempMOVURL: URL?
-    @State private var mixedM4AURL: URL?
-    @State private var mixedAudioDuration: TimeInterval?
-    @State private var transcript: String = ""
-    @State private var transcriptState = TranscriptState()
-    @State private var status: String = "Idle"
-    @State private var systemGain: Float = 1.0
-    @State private var micGain: Float = 1.0
-    @State private var isTranscribing = false
-    @State private var lastTranscriptCount: Int = 0
-    @State private var showSaveBeforeRecordingPrompt = false
-    @State private var knownSpeakerNamesInputs: [String] = Array(repeating: "", count: 4)
-    @State private var knownSpeakerRefsInputs: [String] = Array(repeating: "", count: 4)
-    @State private var showSettingsSheet: Bool = false
-    @State private var showTranscriptFormatDialog: Bool = false
-    @State private var showImportOptionsDialog: Bool = false
-    @State private var showURLImportSheet: Bool = false
-    @State private var importURLString: String = ""
-    @State private var isImportingAudio: Bool = false
-
-    private var hasPartialKnownSpeaker: Bool {
-        let count = min(knownSpeakerNamesInputs.count, knownSpeakerRefsInputs.count)
-        for i in 0..<count {
-            let name = knownSpeakerNamesInputs[i].trimmingCharacters(in: .whitespacesAndNewlines)
-            let ref = knownSpeakerRefsInputs[i].trimmingCharacters(in: .whitespacesAndNewlines)
-            if (name.isEmpty && !ref.isEmpty) || (!name.isEmpty && ref.isEmpty) { return true }
-        }
-        return false
-    }
-
-    private var preparedKnownSpeakers: [OpenAITranscriber.KnownSpeaker] {
-        var list: [OpenAITranscriber.KnownSpeaker] = []
-        let count = min(4, min(knownSpeakerNamesInputs.count, knownSpeakerRefsInputs.count))
-        for i in 0..<count {
-            let name = knownSpeakerNamesInputs[i].trimmingCharacters(in: .whitespacesAndNewlines)
-            let ref = knownSpeakerRefsInputs[i].trimmingCharacters(in: .whitespacesAndNewlines)
-            if !name.isEmpty && !ref.isEmpty {
-                list.append(OpenAITranscriber.KnownSpeaker(name: name, reference: ref))
-            }
-        }
-        return list
-    }
-
-    enum TranscriptionProvider: String, CaseIterable, Identifiable {
-        case appleOnDevice = "Apple (On-Device)"
-        case appleCloud = "Apple (Cloud)"
-        case openAI = "OpenAI (Diarized)"
-        var id: String { rawValue }
-    }
-
     enum WorkflowSection: String, CaseIterable, Identifiable {
         case capture = "Capture"
         case transcript = "Transcript"
         case insights = "Insights"
+
+        var id: String { rawValue }
+    }
+
+    enum TranscriptWorkspaceStep: String, CaseIterable, Identifiable {
+        case run = "Run"
+        case transcript = "Transcript"
+        case speakers = "Speakers"
+        case document = "Document"
+
         var id: String { rawValue }
     }
 
@@ -75,30 +46,40 @@ struct ContentView: View {
 
         var displayName: String {
             switch self {
-            case .plainText: return "Plain Text (.txt)"
-            case .json: return "JSON (.json)"
-            case .webVTT: return "WebVTT Caption (.vtt)"
-            case .srt: return "SubRip Caption (.srt)"
-            }
-        }
-
-        var fileExtension: String {
-            switch self {
-            case .plainText: return "txt"
-            case .json: return "json"
-            case .webVTT: return "vtt"
-            case .srt: return "srt"
+            case .plainText:
+                return "Plain Text (.txt)"
+            case .json:
+                return "JSON (.json)"
+            case .webVTT:
+                return "WebVTT Caption (.vtt)"
+            case .srt:
+                return "SubRip Caption (.srt)"
             }
         }
 
         var contentType: UTType {
             switch self {
-            case .plainText: return .plainText
-            case .json: return .json
+            case .plainText:
+                return .plainText
+            case .json:
+                return .json
             case .webVTT:
                 return UTType(filenameExtension: "vtt") ?? .plainText
             case .srt:
                 return UTType(filenameExtension: "srt") ?? .plainText
+            }
+        }
+
+        var preferredPathExtension: String {
+            switch self {
+            case .plainText:
+                return "txt"
+            case .json:
+                return "json"
+            case .webVTT:
+                return "vtt"
+            case .srt:
+                return "srt"
             }
         }
 
@@ -116,411 +97,918 @@ struct ContentView: View {
         }
     }
 
-    @State private var openAIAPIKey: String = ""
-    @AppStorage("openAIChunkingStrategy") private var openAIChunkingStrategy: String = "auto" // "auto" or "none"
-    @State private var provider: TranscriptionProvider = .appleCloud
-    @State private var nameSuggestionProvider: NameSuggestionProvider = .openAI
-    @State private var selectedSection: WorkflowSection = .capture
+    enum InsightArtifactExportFormat: String, CaseIterable, Identifiable {
+        case plainText
+        case json
 
-    private let recorder = SystemAudioRecorder()
-    private let transcriber = FileTranscriber()
-    private let nameSuggestionService = NameSuggestionService()
+        var id: String { rawValue }
 
-    @State private var nameSuggestionRequestSignal = 0
-    @State private var isNameSuggestionRequestInFlight = false
-    @State private var meetingNotes: String = ""
-    @State private var isGeneratingMeetingNotes = false
-    @State private var meetingNotesError: String?
-    @State private var customInsightsPrompt: String = MeetingNotesService.defaultPrompt
-    @State private var useCustomInsightsPrompt: Bool = false
-    @State private var transcriptViewID = UUID()
-
-    init() {
-        // Initialize provider and key from configuration
-        let config = AIConfigManager.shared.configuration
-        switch config.defaultProvider.lowercased() {
-        case "openai":
-            _provider = State(initialValue: .openAI)
-        case "apple (on-device)", "apple_ondevice", "apple-ondevice", "apple_on_device":
-            _provider = State(initialValue: .appleOnDevice)
-        default:
-            _provider = State(initialValue: .appleCloud)
-        }
-        _openAIAPIKey = State(initialValue: AIConfigManager.shared.openAIKey() ?? "")
-        if let storedSuggestionProvider = NameSuggestionProvider(rawValue: config.nameSuggestionProvider.lowercased()) {
-            _nameSuggestionProvider = State(initialValue: storedSuggestionProvider)
-        } else {
-            _nameSuggestionProvider = State(initialValue: .openAI)
-        }
-    }
-
-    private var speakerLabelsInTranscript: [String] {
-        var ordered: [String] = []
-        var seen: Set<String> = []
-        let lines = transcriptState.displayText.components(separatedBy: CharacterSet.newlines)
-        for rawLine in lines {
-            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
-            guard let colonIndex = trimmed.firstIndex(of: ":") else { continue }
-            let rawLabel = String(trimmed[..<colonIndex])
-            let label = baseLabel(from: rawLabel)
-            guard !label.isEmpty else { continue }
-            if !seen.contains(label) {
-                seen.insert(label)
-                ordered.append(label)
+        var displayName: String {
+            switch self {
+            case .plainText:
+                return "Plain Text (.txt)"
+            case .json:
+                return "JSON (.json)"
             }
         }
-        return ordered
-    }
 
-    private func baseLabel(from rawLabel: String) -> String {
-        let trimmed = rawLabel.trimmingCharacters(in: .whitespaces)
-        if let parenIndex = trimmed.firstIndex(of: "(") {
-            let base = trimmed[..<parenIndex]
-            return base.trimmingCharacters(in: .whitespaces)
+        var contentType: UTType {
+            switch self {
+            case .plainText:
+                return .plainText
+            case .json:
+                return .json
+            }
         }
-        return trimmed
+
+        var preferredPathExtension: String {
+            switch self {
+            case .plainText:
+                return "txt"
+            case .json:
+                return "json"
+            }
+        }
+
+        func suggestedFilename(for artifact: InsightArtifact) -> String {
+            switch self {
+            case .plainText:
+                return "\(artifact.workflow.fileSlug).txt"
+            case .json:
+                return "\(artifact.workflow.fileSlug).json"
+            }
+        }
     }
 
-    private var canAccessTranscript: Bool {
-        mixedM4AURL != nil || !transcriptState.displayText.isEmpty
+    @EnvironmentObject private var appModel: AppModel
+#if os(macOS)
+    @Environment(\.openSettings) private var openSettings
+#endif
+
+    @State private var showStartFreshRecordingPrompt = false
+    @State private var showImportOptionsDialog = false
+    @State private var showURLImportSheet = false
+    @State private var importURLString = ""
+    @State private var knownSpeakerNamesInputs = Array(repeating: "", count: 4)
+    @State private var knownSpeakerRefsInputs = Array(repeating: "", count: 4)
+    @State private var openAIAPIKey: String = ""
+    @State private var sambaNovaAPIKey: String = ""
+    @State private var sambaNovaBaseURL: String = LLMProvider.sambaNova.defaultBaseURL
+    @State private var tScriptConfiguration = TScriptConfiguration()
+    @State private var tScriptModelsResponse: TScriptModelsResponse?
+    @State private var isTScriptModelsLoading = false
+    @State private var tScriptModelsError: String?
+    @State private var defaultInsightProvider: LLMProvider = .openAI
+    @State private var defaultInsightModelID: String = LLMProvider.openAI.defaultModelID(for: .insights)
+    @State private var nameSuggestionModelID: String = LLMProvider.openAI.defaultModelID(for: .nameSuggestions)
+    @State private var openAIModels: [ProviderModelDescriptor] = []
+    @State private var sambaNovaModels: [ProviderModelDescriptor] = []
+    @State private var openAIModelsUpdatedAt: Date?
+    @State private var sambaNovaModelsUpdatedAt: Date?
+    @State private var isOpenAIModelsLoading = false
+    @State private var isSambaNovaModelsLoading = false
+    @State private var openAIModelsError: String?
+    @State private var sambaNovaModelsError: String?
+    @AppStorage("openAIChunkingStrategy") private var openAIChunkingStrategy: String = "auto"
+    @State private var provider: TranscriptionProvider = .appleCloud
+    @State private var nameSuggestionProvider: NameSuggestionProvider = .buildDefault
+    @State private var defaultInsightWorkflow: InsightWorkflow = .fallbackDefault
+    @State private var selectedSection: WorkflowSection = .capture
+    @State private var selectedTranscriptStep: TranscriptWorkspaceStep = .run
+    @State private var customInsightsPrompt = InsightWorkflow.meetingNotes.promptTemplate
+    @State private var selectedInsightWorkflow = InsightWorkflow.meetingNotes
+    @State private var useCustomInsightsPrompt = false
+    @State private var isKnownSpeakerHintsExpanded = false
+    @State private var isTScriptAdvancedOptionsExpanded = false
+    @State private var isSessionDiagnosticsExpanded = false
+    @State private var sessionPendingDeletion: RecordingSessionSummary?
+    @State private var pendingTranscriptNavigationAfterTranscription = false
+
+    private let nameSuggestionService = NameSuggestionService()
+    private let llmModelCatalogService = LLMModelCatalogService()
+
+    init() {
+        let config = AIConfigManager.shared.configuration
+        _provider = State(initialValue: TranscriptionProvider.fromStoredValue(config.defaultProvider))
+        _openAIAPIKey = State(initialValue: AIConfigManager.shared.openAIKey() ?? "")
+        _sambaNovaAPIKey = State(initialValue: AIConfigManager.shared.sambaNovaKey() ?? "")
+        _sambaNovaBaseURL = State(initialValue: AIConfigManager.shared.baseURL(for: .sambaNova))
+        _tScriptConfiguration = State(initialValue: config.tscript)
+        _defaultInsightWorkflow = State(initialValue: config.normalizedInsightWorkflow)
+        _defaultInsightProvider = State(initialValue: config.normalizedInsightProvider)
+        _defaultInsightModelID = State(initialValue: config.defaultInsightModelID)
+        _nameSuggestionModelID = State(initialValue: config.nameSuggestionModelID)
+        _openAIModels = State(initialValue: config.openAI.cachedModels)
+        _sambaNovaModels = State(initialValue: config.sambaNova.cachedModels)
+        _openAIModelsUpdatedAt = State(initialValue: config.openAI.modelsUpdatedAt)
+        _sambaNovaModelsUpdatedAt = State(initialValue: config.sambaNova.modelsUpdatedAt)
+        _selectedInsightWorkflow = State(initialValue: config.normalizedInsightWorkflow)
+        _customInsightsPrompt = State(initialValue: config.normalizedInsightWorkflow.promptTemplate)
+        if let storedSuggestionProvider = NameSuggestionProvider(rawValue: config.nameSuggestionProvider.lowercased()),
+           NameSuggestionProvider.allCases.contains(storedSuggestionProvider) {
+            _nameSuggestionProvider = State(initialValue: storedSuggestionProvider)
+        } else {
+            _nameSuggestionProvider = State(initialValue: .buildDefault)
+        }
     }
 
-    private var canAccessInsights: Bool {
-        !transcriptState.displayText.isEmpty
+    private func openAppSettings() {
+#if os(macOS)
+        openSettings()
+#endif
     }
 
-    private var hasCustomSpeakerAliases: Bool {
-        for label in transcriptState.orderedSpeakerLabels {
-            let alias = transcriptState.alias(for: label).trimmingCharacters(in: .whitespacesAndNewlines)
-            if alias.caseInsensitiveCompare(label) != .orderedSame {
+    private func syncPersistedAIConfiguration() {
+        let config = AIConfigManager.shared.configuration
+        let previousTScriptBaseURL = tScriptConfiguration.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nextTScriptBaseURL = config.tscript.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        openAIAPIKey = AIConfigManager.shared.openAIKey() ?? ""
+        sambaNovaAPIKey = AIConfigManager.shared.sambaNovaKey() ?? ""
+        sambaNovaBaseURL = AIConfigManager.shared.baseURL(for: .sambaNova)
+        tScriptConfiguration = config.tscript
+        openAIModels = config.openAI.cachedModels
+        sambaNovaModels = config.sambaNova.cachedModels
+        openAIModelsUpdatedAt = config.openAI.modelsUpdatedAt
+        sambaNovaModelsUpdatedAt = config.sambaNova.modelsUpdatedAt
+        defaultInsightWorkflow = config.normalizedInsightWorkflow
+        defaultInsightProvider = config.normalizedInsightProvider
+        defaultInsightModelID = config.defaultInsightModelID
+        nameSuggestionModelID = config.nameSuggestionModelID
+        nameSuggestionProvider = config.normalizedNameSuggestionProvider
+
+        if previousTScriptBaseURL != nextTScriptBaseURL {
+            tScriptModelsResponse = nil
+            tScriptModelsError = nil
+        }
+
+        if appModel.activeSession == nil {
+            syncInsightEditorState(from: nil)
+        }
+    }
+
+    private var hasPartialKnownSpeaker: Bool {
+        let count = min(knownSpeakerNamesInputs.count, knownSpeakerRefsInputs.count)
+        for index in 0..<count {
+            let name = knownSpeakerNamesInputs[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            let ref = knownSpeakerRefsInputs[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            if (name.isEmpty && !ref.isEmpty) || (!name.isEmpty && ref.isEmpty) {
                 return true
             }
         }
         return false
     }
 
+    private var preparedKnownSpeakers: [OpenAITranscriber.KnownSpeaker] {
+        let count = min(4, min(knownSpeakerNamesInputs.count, knownSpeakerRefsInputs.count))
+        return (0..<count).compactMap { index in
+            let name = knownSpeakerNamesInputs[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            let ref = knownSpeakerRefsInputs[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty, !ref.isEmpty else { return nil }
+            return OpenAITranscriber.KnownSpeaker(name: name, reference: ref)
+        }
+    }
+
+    private var isOpenAIKeyConfigured: Bool {
+        !openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var isSambaNovaKeyConfigured: Bool {
+        !sambaNovaAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var resolvedInsightModelID: String {
+        let configured = defaultInsightModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            return configured
+        }
+        return AIConfigManager.shared.resolvedModelID(for: .insights, provider: defaultInsightProvider)
+    }
+
+    private var resolvedNameSuggestionModelID: String {
+        let configured = nameSuggestionModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            return configured
+        }
+        if let llmProvider = nameSuggestionProvider.llmProvider {
+            return AIConfigManager.shared.resolvedModelID(for: .nameSuggestions, provider: llmProvider)
+        }
+        return ""
+    }
+
+    private func isAPIKeyConfigured(for provider: LLMProvider) -> Bool {
+        switch provider {
+        case .openAI:
+            return isOpenAIKeyConfigured
+        case .sambaNova:
+            return isSambaNovaKeyConfigured
+        }
+    }
+
+    private func llmModels(for provider: LLMProvider) -> [ProviderModelDescriptor] {
+        switch provider {
+        case .openAI:
+            return openAIModels
+        case .sambaNova:
+            return sambaNovaModels
+        }
+    }
+
+    private func availableModels(for provider: LLMProvider, feature: LLMFeature) -> [ProviderModelDescriptor] {
+        llmModels(for: provider).filter { $0.supports(feature: feature) }
+    }
+
+    private func displayName(for modelID: String, provider: LLMProvider) -> String {
+        let trimmed = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return provider.defaultModelID(for: .insights) }
+        return llmModels(for: provider).first(where: { $0.id == trimmed })?.displayName ?? trimmed
+    }
+
+    private var insightProviderSummary: String {
+        "\(defaultInsightProvider.displayName) • \(displayName(for: resolvedInsightModelID, provider: defaultInsightProvider))"
+    }
+
+    private var nameSuggestionProviderSummary: String {
+        guard let llmProvider = nameSuggestionProvider.llmProvider else {
+            return nameSuggestionProvider.displayName
+        }
+        return "\(llmProvider.displayName) • \(displayName(for: resolvedNameSuggestionModelID, provider: llmProvider))"
+    }
+
+    private var tScriptBaseURLConfigured: Bool {
+        !tScriptConfiguration.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var trimmedTScriptBaseURL: String {
+        tScriptConfiguration.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var normalizedTScriptBaseURL: String {
+        guard !trimmedTScriptBaseURL.isEmpty else { return "" }
+        if trimmedTScriptBaseURL.contains("://") {
+            return trimmedTScriptBaseURL
+        }
+        return "https://\(trimmedTScriptBaseURL)"
+    }
+
+    private var tScriptBaseURLScheme: String? {
+        guard !normalizedTScriptBaseURL.isEmpty else { return nil }
+        return URL(string: normalizedTScriptBaseURL)?.scheme?.lowercased()
+    }
+
+    private var tScriptRequiresHTTPOverride: Bool {
+        tScriptBaseURLScheme == "http" && !tScriptConfiguration.allowInsecureHTTP
+    }
+
+    private var tScriptUsesHTTPOverride: Bool {
+        tScriptBaseURLScheme == "http" && tScriptConfiguration.allowInsecureHTTP
+    }
+
+    private var tScriptTransportReadinessItem: ReadinessItem {
+        if !tScriptBaseURLConfigured {
+            return ReadinessItem(
+                title: "Server URL required",
+                detail: "Add the TScript server base URL in Settings before using this provider.",
+                systemImage: "network.slash",
+                tint: TotalRecGlass.warningAmber
+            )
+        }
+        if tScriptRequiresHTTPOverride {
+            return ReadinessItem(
+                title: "Secure connection required",
+                detail: "This TScript endpoint uses HTTP. Enable the insecure HTTP override in Settings only if you trust this server and network.",
+                systemImage: "lock.trianglebadge.exclamationmark",
+                tint: TotalRecGlass.warningAmber
+            )
+        }
+        if tScriptUsesHTTPOverride {
+            return ReadinessItem(
+                title: "HTTP override enabled",
+                detail: "TScript is using plain HTTP because you explicitly allowed it for this private server.",
+                systemImage: "exclamationmark.shield.fill",
+                tint: TotalRecGlass.warningAmber
+            )
+        }
+        if tScriptConfiguration.allowInvalidTLSCertificates {
+            return ReadinessItem(
+                title: "TLS override enabled",
+                detail: "The app will accept an invalid TLS certificate for this TScript host. Use this only for a server you control.",
+                systemImage: "checkmark.shield.fill",
+                tint: TotalRecGlass.warningAmber
+            )
+        }
+        return ReadinessItem(
+            title: "Secure connection ready",
+            detail: "TScript is configured to use HTTPS for model discovery and transcription.",
+            systemImage: "lock.shield.fill",
+            tint: TotalRecGlass.successGreen
+        )
+    }
+
+    private var tScriptTransportWarningText: String? {
+        if tScriptUsesHTTPOverride {
+            return "Insecure HTTP override is enabled for TScript. Use this only on a trusted private network."
+        }
+        if tScriptConfiguration.allowInvalidTLSCertificates {
+            return "Invalid TLS certificate override is enabled for TScript. Only keep this on for a host you control."
+        }
+        return nil
+    }
+
+    private var tScriptModels: [TScriptModel] {
+        tScriptModelsResponse?.allModels ?? []
+    }
+
+    private var selectedTScriptModelID: String {
+        let configured = tScriptConfiguration.selectedModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            return configured
+        }
+        if let response = tScriptModelsResponse {
+            if let defaultID = response.defaultModelID,
+               response.models[defaultID]?.runtimeAvailable == true {
+                return defaultID
+            }
+            return response.allModels.first(where: \.runtimeAvailable)?.id ?? response.allModels.first?.id ?? ""
+        }
+        return ""
+    }
+
+    private var selectedTScriptModel: TScriptModel? {
+        let selectedID = selectedTScriptModelID
+        guard !selectedID.isEmpty else { return nil }
+        return tScriptModelsResponse?.models[selectedID]
+    }
+
+    private var availableTScriptDiarizationModes: [TScriptDiarizationMode] {
+        selectedTScriptModel?.availableDiarizationModes ?? [.off]
+    }
+
+    private var effectiveTScriptDiarizationMode: TScriptDiarizationMode {
+        if let model = selectedTScriptModel {
+            return model.normalizedDiarizationMode(tScriptConfiguration.diarizationMode)
+        }
+        switch tScriptConfiguration.diarizationMode {
+        case .tiny:
+            return .standard
+        case .off, .standard:
+            return tScriptConfiguration.diarizationMode
+        }
+    }
+
+    private var knownSpeakerHintCount: Int {
+        preparedKnownSpeakers.count
+    }
+
+    private var openAIChunkingDisplayName: String {
+        openAIChunkingStrategy == "none" ? "Single upload" : "Auto chunking"
+    }
+
+    private var providerSystemImage: String {
+        switch provider {
+        case .openAI:
+            return "brain.head.profile"
+        case .tscript:
+            return "server.rack"
+        case .appleOnDevice, .appleCloud:
+            return "waveform"
+        }
+    }
+
+    private var transcriptBinding: Binding<TranscriptState> {
+        Binding(
+            get: { appModel.transcriptState },
+            set: { appModel.updateTranscriptState($0) }
+        )
+    }
+
+    private var availableTranscriptSteps: [TranscriptWorkspaceStep] {
+        TranscriptWorkspaceStep.allCases.filter { step in
+            switch step {
+            case .run:
+                return true
+            case .transcript:
+                return appModel.transcriptState.hasDisplayText
+            case .speakers:
+                return appModel.transcriptState.hasSpeakerLabels
+            case .document:
+                return appModel.transcriptState.hasDisplayText
+            }
+        }
+    }
+
+    private func isTranscriptStepAvailable(_ step: TranscriptWorkspaceStep) -> Bool {
+        availableTranscriptSteps.contains(step)
+    }
+
+    private var defaultTranscriptStep: TranscriptWorkspaceStep {
+        defaultTranscriptStep(for: appModel.transcriptState)
+    }
+
+    private var hasTranscriptDisplayText: Bool {
+        appModel.transcriptState.hasDisplayText
+    }
+
+    private var captureTranscriptPreviewText: String {
+        appModel.transcriptState.previewText(maxSegments: 8, maxCharacters: 900)
+    }
+
     private var isTranscriptionActionDisabled: Bool {
-        mixedM4AURL == nil ||
-        isTranscribing ||
-        isImportingAudio ||
-        (provider == .openAI && hasPartialKnownSpeaker)
+        appModel.audioURL == nil ||
+        appModel.isTranscribing ||
+        appModel.isImportingAudio ||
+        appModel.isRecording ||
+        (provider == .openAI && hasPartialKnownSpeaker) ||
+        (provider == .tscript && !tScriptBaseURLConfigured)
     }
 
-    private func accessIssue(for section: WorkflowSection) -> String? {
-        switch section {
-        case .capture:
-            return nil
-        case .transcript:
-            if canAccessTranscript { return nil }
-            if mixedM4AURL == nil {
-                return "Record or import audio before reviewing transcripts."
+    private var formattedDurationSuffix: String {
+        guard let duration = appModel.mixedAudioDuration else { return "" }
+        let totalSeconds = Int(duration.rounded())
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: " (~%d:%02d)", minutes, seconds)
+    }
+
+    private var captureReadinessItems: [ReadinessItem] {
+        [
+            ReadinessItem(
+                title: appModel.audioURL == nil ? "Session audio pending" : "Session audio ready",
+                detail: appModel.isRecording
+                    ? "Recording is active. Stop when you want to prepare the session audio for transcription."
+                    : (appModel.audioURL == nil
+                        ? "Start a protected recording or import audio into this session."
+                        : "Audio has been prepared\(formattedDurationSuffix) and is ready for transcription."),
+                systemImage: appModel.isRecording ? "record.circle.fill" : (appModel.audioURL == nil ? "waveform.badge.plus" : "checkmark.circle.fill"),
+                tint: appModel.isRecording ? TotalRecGlass.recordingRed : (appModel.audioURL == nil ? TotalRecGlass.captureBlue : TotalRecGlass.successGreen)
+            ),
+            screenCaptureReadinessItem,
+            microphoneReadinessItem,
+            ReadinessItem(
+                title: "Session safety",
+                detail: appModel.hasProtectedActivity
+                    ? "This session is locked while recording or processing is active."
+                    : "Session switching and exports are safe right now.",
+                systemImage: appModel.hasProtectedActivity ? "lock.shield.fill" : "checkmark.shield.fill",
+                tint: appModel.hasProtectedActivity ? TotalRecGlass.captureBlue : TotalRecGlass.successGreen
+            )
+        ]
+    }
+
+    private var transcriptionReadinessItems: [ReadinessItem] {
+        [
+            ReadinessItem(
+                title: appModel.audioURL == nil ? "Audio required" : "Audio ready",
+                detail: appModel.audioURL == nil
+                    ? "Capture or import audio before starting transcription."
+                    : "The current session audio is available\(formattedDurationSuffix).",
+                systemImage: appModel.audioURL == nil ? "waveform.slash" : "waveform.badge.checkmark",
+                tint: appModel.audioURL == nil ? TotalRecGlass.warningAmber : TotalRecGlass.successGreen
+            ),
+            ReadinessItem(
+                title: "Provider",
+                detail: providerReadinessDetail,
+                systemImage: providerSystemImage,
+                tint: workflowSectionTint(.transcript)
+            ),
+            transcriptionPrerequisiteItem,
+            transcriptionModeReadinessItem
+        ]
+    }
+
+    private var insightsReadinessItems: [ReadinessItem] {
+        let trimmedPrompt = customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let artifactCount = appModel.insightArtifactContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : appModel.insightArtifactContent.count
+        let providerReady = isAPIKeyConfigured(for: defaultInsightProvider)
+        let insightModelName = displayName(for: resolvedInsightModelID, provider: defaultInsightProvider)
+
+        return [
+            ReadinessItem(
+                title: hasTranscriptDisplayText ? "Transcript ready" : "Transcript required",
+                detail: hasTranscriptDisplayText
+                    ? "The current session transcript is available for artifact generation."
+                    : "Generate a transcript before creating an insight artifact.",
+                systemImage: hasTranscriptDisplayText ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
+                tint: hasTranscriptDisplayText ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+            ),
+            ReadinessItem(
+                title: providerReady ? "Provider ready" : "Provider setup required",
+                detail: providerReady
+                    ? "\(defaultInsightProvider.displayName) is configured to use \(insightModelName) for artifact generation."
+                    : "Add a \(defaultInsightProvider.displayName) API key in Settings before generating insights.",
+                systemImage: providerReady ? "key.fill" : "exclamationmark.triangle.fill",
+                tint: providerReady ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+            ),
+            ReadinessItem(
+                title: useCustomInsightsPrompt
+                    ? (trimmedPrompt.isEmpty ? "Custom prompt required" : "Custom prompt ready")
+                    : "Workflow ready",
+                detail: useCustomInsightsPrompt
+                    ? (trimmedPrompt.isEmpty
+                        ? "Enter a custom prompt or switch back to the selected workflow."
+                        : "The custom prompt will override the \(selectedInsightWorkflow.displayName.lowercased()) workflow on the next run.")
+                    : "\(selectedInsightWorkflow.displayName) is selected for the next artifact run.",
+                systemImage: useCustomInsightsPrompt
+                    ? (trimmedPrompt.isEmpty ? "text.badge.xmark" : "slider.horizontal.below.rectangle")
+                    : "sparkles.rectangle.stack",
+                tint: useCustomInsightsPrompt
+                    ? (trimmedPrompt.isEmpty ? TotalRecGlass.warningAmber : TotalRecGlass.transcriptViolet)
+                    : TotalRecGlass.successGreen
+            ),
+            ReadinessItem(
+                title: appModel.isGeneratingInsightArtifact ? "Artifact in progress" : (artifactCount == 0 ? "Artifact pending" : "Artifact saved"),
+                detail: appModel.isGeneratingInsightArtifact
+                    ? "A streaming insight run is currently in progress for this session."
+                    : (artifactCount == 0
+                        ? "Generate an artifact when you want a structured transcript-derived output."
+                        : "\(artifactCount) characters are already saved in this session."),
+                systemImage: appModel.isGeneratingInsightArtifact ? "hourglass" : (artifactCount == 0 ? "list.bullet.rectangle" : "checkmark.rectangle.stack"),
+                tint: appModel.isGeneratingInsightArtifact ? TotalRecGlass.captureBlue : (artifactCount == 0 ? TotalRecGlass.neutralTint : TotalRecGlass.successGreen)
+            )
+        ]
+    }
+
+    private var providerReadinessDetail: String {
+        switch provider {
+        case .openAI:
+            return "OpenAI diarized transcription with server-side auto chunking."
+        case .tscript:
+            if let model = selectedTScriptModel {
+                return "TScript using \(model.displayName) on \(normalizedTScriptBaseURL)."
             }
-            return "Run transcription to unlock speaker-label tools."
-        case .insights:
-            if transcriptState.displayText.isEmpty {
-                return "Generate a transcript first to unlock insights."
-            }
-            if openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return "Set an OpenAI API key in Settings to analyze transcripts."
-            }
-            return nil
+            return "TScript uses the configured server and model registry to drive model selection and feature gating."
+        case .appleOnDevice:
+            return "Apple on-device transcription stays local when the platform can handle it."
+        case .appleCloud:
+            return "Apple cloud transcription can fall back to Apple's speech service."
         }
     }
 
-
-    private var providerStatusBadge: some View {
-        HStack(spacing: 8) {
-            Label(provider.rawValue, systemImage: provider == .openAI ? "brain.head.profile" : "waveform")
-                .labelStyle(.titleAndIcon)
-                .font(.caption)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color.gray.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
-            if provider == .openAI {
-                let hasKey = (AIConfigManager.shared.openAIKey() ?? "").isEmpty == false
-                Label(hasKey ? "API key configured" : "API key missing", systemImage: hasKey ? "checkmark.seal" : "exclamationmark.triangle")
-                    .labelStyle(.titleAndIcon)
-                    .font(.caption)
-                    .foregroundStyle(hasKey ? .green : .orange)
+    private var transcriptionPrerequisiteItem: ReadinessItem {
+        switch provider {
+        case .openAI:
+            return ReadinessItem(
+                title: isOpenAIKeyConfigured ? "API key ready" : "API key required",
+                detail: isOpenAIKeyConfigured
+                    ? "OpenAI is configured and ready for diarized transcription."
+                    : "Add an OpenAI API key in Settings before running this provider.",
+                systemImage: isOpenAIKeyConfigured ? "key.fill" : "exclamationmark.triangle.fill",
+                tint: isOpenAIKeyConfigured ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+            )
+        case .tscript:
+            if !tScriptBaseURLConfigured ||
+                tScriptRequiresHTTPOverride ||
+                tScriptUsesHTTPOverride ||
+                tScriptConfiguration.allowInvalidTLSCertificates {
+                return tScriptTransportReadinessItem
             }
-            Spacer()
+
+            let detail: String
+            let title: String
+            let icon: String
+            let tint: Color
+            if isTScriptModelsLoading {
+                title = "Loading models"
+                detail = "Refreshing the TScript model registry for the current server."
+                icon = "arrow.triangle.2.circlepath"
+                tint = TotalRecGlass.captureBlue
+            } else if let error = tScriptModelsError, !error.isEmpty {
+                title = "Model registry needs attention"
+                detail = error
+                icon = "exclamationmark.triangle.fill"
+                tint = TotalRecGlass.warningAmber
+            } else if let model = selectedTScriptModel {
+                title = model.runtimeAvailable ? "Model ready" : "Model unavailable"
+                detail = model.runtimeAvailable
+                    ? "\(model.displayName) is available on the current TScript server."
+                    : "\(model.displayName) is currently unavailable on the current TScript server."
+                icon = model.runtimeAvailable ? "server.rack" : "server.rack"
+                tint = model.runtimeAvailable ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+            } else {
+                title = "Model registry pending"
+                detail = "Refresh models to inspect server capabilities and choose a specific TScript model."
+                icon = "square.stack.3d.up.slash"
+                tint = TotalRecGlass.neutralTint
+            }
+            return ReadinessItem(
+                title: title,
+                detail: detail,
+                systemImage: icon,
+                tint: tint
+            )
+        case .appleOnDevice, .appleCloud:
+            return speechRecognitionReadinessItem
         }
     }
 
-    @ViewBuilder
-    private var sectionContent: some View {
-        switch selectedSection {
-        case .capture:
-            captureSection
-        case .transcript:
-            transcriptSection
-        case .insights:
-            insightsSection
+    private var transcriptionModeReadinessItem: ReadinessItem {
+        switch provider {
+        case .openAI:
+            let hintSummary = knownSpeakerHintCount == 0 ? "No known-speaker hints configured." : "\(knownSpeakerHintCount) known-speaker hint\(knownSpeakerHintCount == 1 ? "" : "s") ready."
+            let detail = hasPartialKnownSpeaker
+                ? "Finish or clear the incomplete speaker-hint rows before you run transcription."
+                : "\(openAIChunkingDisplayName) selected. \(hintSummary)"
+            return ReadinessItem(
+                title: hasPartialKnownSpeaker ? "Speaker hints need attention" : "Upload mode",
+                detail: detail,
+                systemImage: hasPartialKnownSpeaker ? "person.crop.rectangle.stack.fill" : (openAIChunkingStrategy == "none" ? "arrow.up.doc" : "square.split.2x2"),
+                tint: hasPartialKnownSpeaker ? TotalRecGlass.warningAmber : TotalRecGlass.transcriptViolet
+            )
+        case .tscript:
+            let selectedModelName = selectedTScriptModel?.displayName ?? "Server default"
+            let diarization = effectiveTScriptDiarizationMode == .off
+                ? "Diarization off"
+                : "Diarization: \(effectiveTScriptDiarizationMode.displayName)"
+            let reviewMode = selectedTScriptModel?.supportsTimestamps == true
+                ? "Timed review available"
+                : "Document review only"
+            return ReadinessItem(
+                title: selectedTScriptModel?.supportsTimestamps == true || availableTScriptDiarizationModes.count > 1 ? "Model options" : "Model selection",
+                detail: "\(selectedModelName) selected. \(reviewMode). \(diarization).",
+                systemImage: "slider.horizontal.3",
+                tint: TotalRecGlass.transcriptViolet
+            )
+        case .appleOnDevice, .appleCloud:
+            return ReadinessItem(
+                title: appModel.isTranscribing ? "Transcription in progress" : "Preview behavior",
+                detail: appModel.isTranscribing
+                    ? "Partial text appears below while Apple transcription runs."
+                    : "Apple transcription can stream partial text into the live preview area while it runs.",
+                systemImage: appModel.isTranscribing ? "text.badge.clock" : "text.line.first.and.arrowtriangle.forward",
+                tint: appModel.isTranscribing ? TotalRecGlass.captureBlue : TotalRecGlass.neutralTint
+            )
         }
     }
 
-    @ViewBuilder
-    private var captureSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Capture & Prepare")
-                .font(.title3).bold()
-            Text("Record system audio, import existing files, and kick off transcription when you're ready.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 12) {
-                Button(isRecording ? "Stop Recording" : "Start Recording") {
-                    if isRecording {
-                        stopRecording()
-                    } else {
-                        if mixedM4AURL != nil || !transcriptState.isEmpty {
-                            showSaveBeforeRecordingPrompt = true
-                        } else {
-                            startRecording()
-                        }
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.space, modifiers: [])
-
-                Button("Import Audio…") { showImportOptionsDialog = true }
-                    .disabled(isRecording || isTranscribing || isImportingAudio)
-
-                Button("Save Audio…", action: saveAudio)
-                    .disabled(mixedM4AURL == nil)
-
-                Button("Save Transcript…") { showTranscriptFormatDialog = true }
-                    .disabled(transcriptState.isEmpty)
-
-                Spacer()
-            }
-
-            if let mov = tempMOVURL {
-                LabeledContent("Temp .mov") { Text(mov.lastPathComponent) }
-            }
-            if let m4a = mixedM4AURL {
-                LabeledContent("Mixed .m4a") { Text(m4a.lastPathComponent) }
-            }
-
-            if !transcriptState.displayText.isEmpty {
-                Divider()
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Latest Transcript Preview")
-                            .font(.headline)
-                        Spacer()
-                        Button("Open Transcript Tools") { selectedSection = .transcript }
-                            .buttonStyle(.bordered)
-                    }
-                    ScrollView {
-                        Text(transcriptState.attributedDisplayText)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .padding(8)
-                            .background(Color.gray.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    .frame(minHeight: 120, maxHeight: 220)
-                }
-            }
-        }
-        .padding()
-        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    @ViewBuilder
-    private var transcriptSection: some View {
-        if transcriptState.displayText.isEmpty {
-            transcriptEmptyState
-        } else {
-            transcriptReviewContent
-        }
-    }
-
-    @ViewBuilder
-    private var transcriptEmptyState: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Transcript not available yet")
-                .font(.title3).bold()
-            Text(mixedM4AURL == nil
-                 ? "Record or import audio from the Capture tab, then run transcription to unlock speaker-label tools."
-                 : "✅ Audio is ready\(formattedDurationSuffix()). Run transcription to unlock speaker-label tools.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            transcriptCallToAction
-        }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    @ViewBuilder
-    private var transcriptCallToAction: some View {
-        HStack(spacing: 8) {
-            Button("Transcribe Audio") { transcribe() }
-                .disabled(isTranscriptionActionDisabled)
-                .buttonStyle(.borderedProminent)
-            Button("Go to Capture") { selectedSection = .capture }
-                .buttonStyle(.bordered)
-        }
-    }
-
-    @ViewBuilder
-    private var transcriptReviewContent: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Transcript Review & Speaker Tools")
-                .font(.title3).bold()
-            transcriptManagementToolbar
-
-                TranscriptView(
-                    transcript: $transcriptState,
-                    suggestionService: nameSuggestionService,
-                    externalSuggestionTrigger: $nameSuggestionRequestSignal,
-                    externalRequestInFlight: $isNameSuggestionRequestInFlight
-                )
-                .id(transcriptViewID)
-
-        }
-        .padding()
-        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    @ViewBuilder
-    private var transcriptManagementToolbar: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Button(isTranscribing ? "Transcribing..." : "Re-run Transcription") {
-                    transcribe()
-                }
-                .disabled(isTranscriptionActionDisabled)
-                .buttonStyle(.bordered)
-
-                Button(isNameSuggestionRequestInFlight ? "Requesting…" : "Request Suggestions") {
-                    status = "Requesting speaker name suggestions..."
-                    nameSuggestionRequestSignal &+= 1
-                }
-                .disabled(isNameSuggestionRequestInFlight || transcriptState.displayText.isEmpty || nameSuggestionProvider == .disabled)
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("requestSuggestionsToolbarButton")
-
-                Button("Consolidate Consecutive Speakers", action: consolidateConsecutiveSpeakers)
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("consolidateSpeakersButton")
-
-                Button("Reset Speaker Names", action: resetSpeakerAliases)
-                    .buttonStyle(.bordered)
-                    .disabled(!hasCustomSpeakerAliases)
-                    .accessibilityIdentifier("resetAliasesButtonToolbar")
-            }
-
-            HStack(spacing: 8) {
-                Button("Save Transcript (Text)") { saveTranscript(as: .plainText) }
-                    .buttonStyle(.bordered)
-                    .disabled(transcriptState.isEmpty)
-                Button("Save Transcript (JSON)") { saveTranscript(as: .json) }
-                    .buttonStyle(.bordered)
-                    .disabled(transcriptState.isEmpty)
-            }
-
-            if isNameSuggestionRequestInFlight {
-                Text("Contacting \(nameSuggestionProvider.displayName) for name ideas…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
+    private var screenCaptureReadinessItem: ReadinessItem {
 #if os(macOS)
-    private func configureInitialWindowSize(for window: NSWindow) {
-        let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
-        let targetHeight = max(min(visibleFrame.height * 0.55, 900), 520)
-        let targetWidth = min(max(visibleFrame.width * 0.55, 900), visibleFrame.width - 80)
-        let originX = visibleFrame.midX - targetWidth / 2
-        let originY = visibleFrame.midY - targetHeight / 2
-        let frame = NSRect(x: originX, y: originY, width: targetWidth, height: targetHeight)
-        window.setFrame(frame, display: true, animate: false)
-    }
+        let granted = CGPreflightScreenCaptureAccess()
+        return ReadinessItem(
+            title: granted ? "Screen recording ready" : "Screen recording required",
+            detail: granted
+                ? "System audio capture can start immediately."
+                : "Grant Screen Recording access before starting a system capture. Audio import still works without it.",
+            systemImage: granted ? "display.badge.checkmark" : "exclamationmark.triangle.fill",
+            tint: granted ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+        )
+#else
+        return ReadinessItem(
+            title: "Screen recording",
+            detail: "System audio readiness is only shown on macOS.",
+            systemImage: "display",
+            tint: .secondary
+        )
 #endif
-
-    @ViewBuilder
-    private var insightsSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Insights")
-                .font(.title3).bold()
-            Text("Generate structured meeting notes and future analytics from your transcript.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            meetingNotesPanel
-
-            HStack(spacing: 8) {
-                Button("Save Notes (Text)") { saveMeetingNotes(as: .plainText) }
-                    .buttonStyle(.bordered)
-                    .disabled(meetingNotes.isEmpty)
-                Button("Save Notes (JSON)") { saveMeetingNotes(as: .json) }
-                    .buttonStyle(.bordered)
-                    .disabled(meetingNotes.isEmpty)
-            }
-        }
-        .padding()
-        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    var body: some View {
-        let base = VStack(alignment: .leading, spacing: 16) {
-            headerContent
-            sectionTabs
+    private var microphoneReadinessItem: ReadinessItem {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return ReadinessItem(
+                title: "Microphone ready",
+                detail: "Mic access is granted for system-plus-mic recordings.",
+                systemImage: "mic.fill",
+                tint: TotalRecGlass.successGreen
+            )
+        case .notDetermined:
+            return ReadinessItem(
+                title: "Microphone permission pending",
+                detail: "macOS will ask for mic access the first time you start recording.",
+                systemImage: "mic.badge.plus",
+                tint: TotalRecGlass.captureBlue
+            )
+        case .denied, .restricted:
+            return ReadinessItem(
+                title: "Microphone access blocked",
+                detail: "Grant Microphone access in System Settings to capture your voice alongside system audio.",
+                systemImage: "mic.slash.fill",
+                tint: TotalRecGlass.warningAmber
+            )
+        @unknown default:
+            return ReadinessItem(
+                title: "Microphone status unavailable",
+                detail: "The app could not determine microphone authorization state.",
+                systemImage: "questionmark.circle",
+                tint: .secondary
+            )
         }
-        return base
-        .padding()
-        .onChange(of: selectedSection) { oldValue, newValue in
-            guard newValue != oldValue else { return }
-            if let issue = accessIssue(for: newValue) {
-                selectedSection = oldValue
+    }
+
+    private var speechRecognitionReadinessItem: ReadinessItem {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized:
+            return ReadinessItem(
+                title: "Speech access ready",
+                detail: "Apple transcription has the speech-recognition permission it needs.",
+                systemImage: "waveform.badge.checkmark",
+                tint: TotalRecGlass.successGreen
+            )
+        case .notDetermined:
+            return ReadinessItem(
+                title: "Speech permission pending",
+                detail: "The system will request speech-recognition permission the first time Apple transcription runs.",
+                systemImage: "waveform.badge.plus",
+                tint: TotalRecGlass.captureBlue
+            )
+        case .denied, .restricted:
+            return ReadinessItem(
+                title: "Speech access blocked",
+                detail: "Grant Speech Recognition access in System Settings before using the Apple providers.",
+                systemImage: "waveform.slash",
+                tint: TotalRecGlass.warningAmber
+            )
+        @unknown default:
+            return ReadinessItem(
+                title: "Speech access unknown",
+                detail: "The app could not determine speech-recognition authorization state.",
+                systemImage: "questionmark.circle",
+                tint: .secondary
+            )
+        }
+    }
+
+    private var sessionDiagnosticsItems: [DiagnosticItem] {
+        var items: [DiagnosticItem] = []
+
+        if let activeSession = appModel.activeSession {
+            items.append(DiagnosticItem(label: "Session stage", value: sessionStageTitle(activeSession.stage)))
+            items.append(DiagnosticItem(label: "Status", value: activeSession.statusMessage))
+            items.append(DiagnosticItem(label: "Session folder", value: appModel.activeSessionDirectoryURL?.path ?? activeSession.sessionDirectoryName))
+
+            if let provider = activeSession.lastTranscriptionProvider, !provider.isEmpty {
+                items.append(DiagnosticItem(label: "Last transcription provider", value: provider))
             }
+
+            if let mov = appModel.tempMOVURL {
+                items.append(DiagnosticItem(label: "Raw capture", value: mov.path))
+            }
+
+            if let audioURL = appModel.audioURL {
+                items.append(DiagnosticItem(label: "Session audio", value: audioURL.path))
+            }
+
+            if !appModel.transcriptState.isEmpty {
+                items.append(DiagnosticItem(label: "Transcript", value: transcriptDiagnosticSummary))
+            }
+
+            if let insightArtifact = appModel.insightArtifact, insightArtifact.hasContent {
+                items.append(
+                    DiagnosticItem(
+                        label: "Insight artifact",
+                        value: "\(insightArtifact.workflow.displayName), \(insightArtifact.content.count) characters saved"
+                    )
+                )
+            }
+        } else {
+            items.append(DiagnosticItem(label: "Session", value: "No active session yet"))
         }
-        .onChange(of: transcriptState.displayText.isEmpty) { _, _ in
-            if !canAccessTranscript && selectedSection == .transcript {
+
+        return items
+    }
+
+    private var transcriptDiagnosticSummary: String {
+        let speakerCount = appModel.transcriptState.orderedSpeakerLabels.count
+        let segmentCount = appModel.transcriptState.segments.count
+        if segmentCount > 0 {
+            return "\(speakerCount) speaker\(speakerCount == 1 ? "" : "s"), \(segmentCount) segment\(segmentCount == 1 ? "" : "s")"
+        }
+        let lineCount = appModel.transcriptState.rawText.split(whereSeparator: \.isNewline).count
+        return "\(lineCount) transcript line\(lineCount == 1 ? "" : "s")"
+    }
+
+    private var hasInvalidCustomInsightsPrompt: Bool {
+        useCustomInsightsPrompt && customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var isInsightActionDisabled: Bool {
+        appModel.isGeneratingInsightArtifact ||
+        !hasTranscriptDisplayText ||
+        appModel.isTranscribing ||
+        !isAPIKeyConfigured(for: defaultInsightProvider) ||
+        hasInvalidCustomInsightsPrompt
+    }
+
+    private var deleteSessionDialogBinding: Binding<Bool> {
+        Binding(
+            get: { sessionPendingDeletion != nil },
+            set: { newValue in
+                if !newValue {
+                    sessionPendingDeletion = nil
+                }
+            }
+        )
+    }
+
+    private var permissionAlertBinding: Binding<Bool> {
+        Binding(
+            get: { appModel.showPermissionAlert },
+            set: { newValue in
+                if !newValue {
+                    appModel.clearPermissionAlert()
+                }
+            }
+        )
+    }
+
+    private var splitWorkspace: some View {
+        NavigationSplitView {
+            sessionSidebarPane
+        } detail: {
+            mainWorkspacePane
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+
+    private var sessionSidebarPane: some View {
+        SessionSidebarView(
+            sessionPendingDeletion: $sessionPendingDeletion,
+            onToggleRecording: toggleRecordingFromSidebar,
+            onImportAudio: {
+                selectedSection = .capture
+                showImportOptionsDialog = true
+            },
+            onClearWorkspace: {
+                appModel.showNewSessionWorkspace()
                 selectedSection = .capture
             }
-            if !canAccessInsights && selectedSection == .insights {
-                selectedSection = canAccessTranscript ? .transcript : .capture
+        )
+        .environmentObject(appModel)
+        .navigationSplitViewColumnWidth(min: 250, ideal: 290, max: 340)
+    }
+
+    private var mainWorkspacePane: some View {
+        mainContent
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(
+                TotalRecAmbientBackground(
+                    accent: ambientAccentTint,
+                    secondaryAccent: ambientSecondaryTint
+                )
+            )
+    }
+
+    private var contentWithChangeHandlers: some View {
+        splitWorkspace
+            .onAppear {
+                normalizeSelectedTranscriptStep(preferred: defaultTranscriptStep)
+                syncInsightEditorState(from: appModel.activeSession?.insightSettings)
             }
-        }
-        .confirmationDialog(
-            "Save current session?",
-            isPresented: $showSaveBeforeRecordingPrompt,
+            .onChange(of: appModel.transcriptState) { oldValue, newValue in
+                if pendingTranscriptNavigationAfterTranscription, oldValue != newValue {
+                    pendingTranscriptNavigationAfterTranscription = false
+                    selectedSection = .transcript
+                    normalizeSelectedTranscriptStep(preferred: defaultTranscriptStep(for: newValue))
+                } else {
+                    normalizeSelectedTranscriptStep()
+                }
+            }
+            .onChange(of: appModel.isTranscribing) { oldValue, newValue in
+                if newValue {
+                    normalizeSelectedTranscriptStep(preferred: .run)
+                } else if oldValue {
+                    pendingTranscriptNavigationAfterTranscription = false
+                }
+            }
+            .onChange(of: appModel.activeSession?.id) { _, _ in
+                pendingTranscriptNavigationAfterTranscription = false
+                normalizeSelectedTranscriptStep(preferred: defaultTranscriptStep)
+                syncInsightEditorState(from: appModel.activeSession?.insightSettings)
+            }
+            .onChange(of: selectedSection) { _, newSection in
+                if newSection == .transcript {
+                    normalizeSelectedTranscriptStep()
+                }
+            }
+            .onChange(of: appModel.insightArtifactContent) { oldValue, newValue in
+                if oldValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    selectedSection = .insights
+                }
+            }
+    }
+
+    private var contentWithDialogs: some View {
+        contentWithChangeHandlers
+            .confirmationDialog(
+            "Start a fresh recording?",
+            isPresented: $showStartFreshRecordingPrompt,
             titleVisibility: .visible
         ) {
-            Button("Save Audio…") { saveAudio() }
-            Button("Save Transcript…") {
-                showSaveBeforeRecordingPrompt = false
-                showTranscriptFormatDialog = true
+            Button {
+                saveAudio()
+            } label: {
+                Label("Save Audio…", systemImage: "square.and.arrow.down")
             }
-                .disabled(transcriptState.isEmpty)
-            Button("Discard", role: .destructive) {
-                transcriptState = TranscriptState()
-                lastTranscriptCount = 0
-                mixedM4AURL = nil
-                status = "Starting new recording..."
-                startRecording()
+            Button(action: saveTranscript) {
+                Label("Save Transcript…", systemImage: "square.and.arrow.down")
+            }
+                .disabled(appModel.transcriptState.isEmpty)
+            Button("Start Fresh Recording", role: .destructive) {
+                appModel.startRecording()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("You have an existing mixed audio and/or transcript. Would you like to save them before starting a new recording?")
-        }
-        .confirmationDialog(
-            "Save Transcript As…",
-            isPresented: $showTranscriptFormatDialog,
-            titleVisibility: .visible
-        ) {
-            ForEach(TranscriptExportFormat.allCases) { format in
-                Button(format.displayName) {
-                    showTranscriptFormatDialog = false
-                    saveTranscript(as: format)
-                }
-            }
-            Button("Cancel", role: .cancel) {}
+            Text("Your existing session remains on disk, but the main window will switch to a new recording session.")
         }
         .confirmationDialog(
             "Import Audio",
@@ -538,693 +1026,2270 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        .alert("Screen capture permission required",
-               isPresented: $permissionAlert,
-               actions: {
-                   Button("OK", role: .cancel) {}
-               }, message: {
-                   Text("Grant Screen Recording permission in System Settings > Privacy & Security > Screen Recording, then try again.")
-               })
-        .onChange(of: provider) { oldProvider, newProvider in
-            let value: String
-            switch newProvider {
-            case .openAI: value = "openai"
-            case .appleOnDevice: value = "apple_ondevice"
-            case .appleCloud: value = "apple_cloud"
-            }
-            do { try AIConfigManager.shared.setDefaultProvider(value) } catch {
-                status = "Failed to save default provider: \(error.localizedDescription)"
-            }
-        }
-        .onChange(of: nameSuggestionProvider) { _, newProvider in
-            do { try AIConfigManager.shared.setNameSuggestionProvider(newProvider.rawValue) } catch {
-                status = "Failed to save name suggestion provider: \(error.localizedDescription)"
-            }
-        }
-        .onChange(of: openAIAPIKey) { oldKey, newKey in
-            do { try AIConfigManager.shared.updateOpenAIKey(newKey.isEmpty ? nil : newKey) } catch {
-                status = "Failed to save OpenAI key: \(error.localizedDescription)"
-            }
-        }
-        .onChange(of: useCustomInsightsPrompt) { _, newValue in
-            if newValue && customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                customInsightsPrompt = MeetingNotesService.defaultPrompt
-            }
-        }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(action: { showSettingsSheet = true }) {
-                    Image(systemName: "gearshape")
+        .confirmationDialog(
+            "Delete Session?",
+            isPresented: deleteSessionDialogBinding,
+            titleVisibility: .visible,
+            presenting: sessionPendingDeletion
+        ) { session in
+            Button("Delete \(session.sourceDescription)", role: .destructive) {
+                appModel.deleteSession(session.id)
+                if appModel.activeSession == nil {
+                    selectedSection = .capture
                 }
-                .help("Settings")
-                .accessibilityLabel("Settings")
+                sessionPendingDeletion = nil
             }
+            Button("Cancel", role: .cancel) {
+                sessionPendingDeletion = nil
+            }
+        } message: { session in
+            Text("This removes the session and its saved audio, transcript, and insight artifact from disk.")
         }
-        .sheet(isPresented: $showSettingsSheet) {
-            SettingsSheetView(
-                provider: $provider,
-                nameSuggestionProvider: $nameSuggestionProvider,
-                openAIAPIKey: $openAIAPIKey,
-                openAIChunkingStrategy: $openAIChunkingStrategy,
-                knownSpeakerNamesInputs: $knownSpeakerNamesInputs,
-                knownSpeakerRefsInputs: $knownSpeakerRefsInputs,
-                systemGain: $systemGain,
-                micGain: $micGain,
-                onClose: { showSettingsSheet = false }
-            )
-            .frame(minWidth: 520, minHeight: 420)
+        .alert(
+            "Screen capture permission required",
+            isPresented: permissionAlertBinding
+        ) {
+            Button("OK", role: .cancel) {
+                appModel.clearPermissionAlert()
+            }
+        } message: {
+            Text("Grant Screen Recording permission in System Settings > Privacy & Security > Screen Recording, then try again.")
         }
-        .sheet(isPresented: $showURLImportSheet) {
-            URLImportSheet(
-                urlString: $importURLString,
-                isImporting: isImportingAudio,
-                onImport: { beginURLImport(from: $0) },
-                onDismiss: { showURLImportSheet = false }
-            )
-            .frame(minWidth: 380, minHeight: 220)
-        }
+    }
+
+    private var contentWithPreferences: some View {
+        contentWithDialogs
+            .onChange(of: provider) { _, newProvider in
+                switch newProvider {
+                case .openAI:
+                    if hasPartialKnownSpeaker || knownSpeakerHintCount > 0 {
+                        isKnownSpeakerHintsExpanded = true
+                    }
+                case .tscript:
+                    if tScriptModelsResponse == nil && tScriptBaseURLConfigured {
+                        refreshTScriptModels()
+                    }
+                case .appleOnDevice, .appleCloud:
+                    break
+                }
+                do {
+                    try AIConfigManager.shared.setDefaultProvider(newProvider.storageValue)
+                } catch {
+                    appModel.setStatusMessage("Failed to save default provider: \(error.localizedDescription)")
+                }
+            }
+            .onChange(of: tScriptConfiguration) { oldValue, newValue in
+                handleTScriptConfigurationChange(oldValue: oldValue, newValue: newValue)
+            }
+            .onChange(of: tScriptConfiguration.selectedModelID) { _, _ in
+                guard let model = selectedTScriptModel else { return }
+                normalizeTScriptDiarizationSelection(for: model)
+                if !model.supportsTranslation {
+                    tScriptConfiguration.translate = false
+                }
+            }
+            .onChange(of: useCustomInsightsPrompt) { _, newValue in
+                if newValue && customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    customInsightsPrompt = selectedInsightWorkflow.promptTemplate
+                }
+                persistInsightEditorState()
+            }
+            .onChange(of: selectedInsightWorkflow) { _, newWorkflow in
+                if !useCustomInsightsPrompt {
+                    customInsightsPrompt = newWorkflow.promptTemplate
+                }
+                persistInsightEditorState()
+            }
+            .onChange(of: customInsightsPrompt) { _, _ in
+                persistInsightEditorState()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .totalRecAIConfigurationDidChange)) { _ in
+                syncPersistedAIConfiguration()
+            }
+    }
+
+    private var presentedContent: some View {
+        contentWithPreferences
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    workflowSectionPicker
+                }
+
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        openAppSettings()
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .help("Settings")
+                    .accessibilityLabel("Settings")
+                }
+            }
+            .sheet(isPresented: $showURLImportSheet) {
+                URLImportSheet(
+                    urlString: $importURLString,
+                    isImporting: appModel.isImportingAudio,
+                    onImport: { beginURLImport(from: $0) },
+                    onDismiss: { showURLImportSheet = false }
+                )
+                .frame(minWidth: 380, minHeight: 220)
+            }
 #if os(macOS)
-        .background(WindowConfigurator { window in
-            configureInitialWindowSize(for: window)
-        })
+            .background(WindowConfigurator { window in
+                configureInitialWindowSize(for: window)
+            })
 #endif
     }
 
-    @ViewBuilder
-    private var headerContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("TotalRec")
-                .font(.largeTitle).bold()
-
-            Text("Status: \(status)")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            providerStatusBadge
-        }
+    var body: some View {
+        presentedContent
     }
 
-    // MARK: - Actions
-
-    private func consolidateConsecutiveSpeakers() {
-        guard transcriptState.consolidateConsecutiveSpeakers() else {
-            status = "No consecutive speaker turns to consolidate."
-            return
-        }
-        transcript = transcriptState.displayText
-        lastTranscriptCount = transcriptState.displayText.count
-        transcriptViewID = UUID()
-        status = "Consolidated consecutive speaker turns."
-    }
-
-    private func resetSpeakerAliases() {
-        guard hasCustomSpeakerAliases else {
-            status = "Speaker aliases already reset."
-            return
-        }
-        transcriptState.resetAliases()
-        transcript = transcriptState.displayText
-        lastTranscriptCount = transcriptState.displayText.count
-        transcriptViewID = UUID()
-        status = "Speaker aliases reset."
-    }
-
-    private func transcribeWithOpenAI(audioURL: URL) async {
-        do {
-            let chunks = try await AudioChunker.chunkIfNeeded(
-                sourceURL: audioURL,
-                strategy: openAIChunkingStrategy
-            )
-            print("[Transcribe][OpenAI] Using \(chunks.count) chunk(s) for \(audioURL.lastPathComponent)")
-            defer {
-                for chunk in chunks where chunk.isTemporary {
-                    try? FileManager.default.removeItem(at: chunk.url)
-                }
+    private var mainContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if let recoveryNotice = appModel.recoveryNotice {
+                statusBanner(
+                    recoveryNotice,
+                    systemImage: "arrow.triangle.2.circlepath.circle.fill",
+                    tint: TotalRecGlass.warningAmber,
+                    dismissAction: {
+                        appModel.dismissRecoveryNotice()
+                    }
+                )
             }
 
-            var combinedState = TranscriptState()
-            let totalChunks = chunks.count
-            for (index, chunk) in chunks.enumerated() {
-                await MainActor.run {
-                    if totalChunks > 1 {
-                        status = "Transcribing chunk \(index + 1)/\(totalChunks)..."
-                    } else {
-                        status = "Transcribing..."
+            if let currentLiveActivityStage {
+                activityBanner(for: currentLiveActivityStage)
+            }
+            currentSectionContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(20)
+    }
+
+    private var currentLiveActivityStage: SessionStage? {
+        guard let stage = appModel.activeSession?.stage, stage.totalRecShowsLiveActivity else { return nil }
+        return stage
+    }
+
+    private func activityBanner(for stage: SessionStage) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(TotalRecGlass.tonedTint(stage.totalRecStatusTint, usage: .secondarySurface).opacity(0.16))
+
+                TotalRecActivitySymbol(
+                    systemImage: stage.totalRecMenuBarIconName,
+                    tint: stage.totalRecStatusTint,
+                    motion: stage.totalRecActivityMotion,
+                    size: 20,
+                    weight: .bold
+                )
+            }
+            .frame(width: 48, height: 48)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(stage.totalRecProgressHeadline)
+                    .font(.headline)
+
+                Text(appModel.statusText)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.primary)
+
+                Text(activitySupportText(for: stage))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    activityMetaPill("Session locked", systemImage: "lock.fill", tint: TotalRecGlass.recordingRed)
+
+                    if stage == .recording, let elapsed = appModel.recordingElapsedText {
+                        activityMetaPill(elapsed, systemImage: "timer", tint: TotalRecGlass.recordingRed)
+                    }
+
+                    if stage == .transcribing, !appModel.processingPreviewText.isEmpty {
+                        activityMetaPill("Live preview", systemImage: "text.line.first.and.arrowtriangle.forward", tint: TotalRecGlass.successGreen)
+                    }
+
+                    if stage == .generatingInsights {
+                        insightStopButton
                     }
                 }
-                print("[Transcribe][OpenAI] Uploading chunk \(index + 1)/\(totalChunks) from \(chunk.url.lastPathComponent) offset=\(String(format: "%.2f", chunk.startTime))s")
 
-                let chunkState = try await OpenAITranscriber().transcribeDiarized(
-                    audioURL: chunk.url,
-                    apiKey: openAIAPIKey,
-                    baseURL: "https://api.openai.com",
-                    chunkingStrategy: openAIChunkingStrategy,
-                    knownSpeakerNames: nil,
-                    knownSpeakerReferences: nil,
-                    knownSpeakers: preparedKnownSpeakers.isEmpty ? nil : preparedKnownSpeakers,
-                    onProgress: nil
-                )
-                print("[Transcribe][OpenAI] Chunk \(index + 1)/\(totalChunks) returned \(chunkState.segments.count) segments")
-                combinedState.append(chunkState, timeOffset: chunk.startTime)
-            }
+                VStack(alignment: .trailing, spacing: 8) {
+                    activityMetaPill("Session locked", systemImage: "lock.fill", tint: TotalRecGlass.recordingRed)
 
-            await MainActor.run {
-                transcriptState = combinedState
-                transcript = combinedState.displayText
-                lastTranscriptCount = combinedState.displayText.count
-                status = totalChunks > 1 ? "Transcription complete. (OpenAI, \(totalChunks) chunks)" : "Transcription complete. (OpenAI)"
-                selectedSection = .transcript
-                isTranscribing = false
+                    if stage == .recording, let elapsed = appModel.recordingElapsedText {
+                        activityMetaPill(elapsed, systemImage: "timer", tint: TotalRecGlass.recordingRed)
+                    }
+
+                    if stage == .transcribing, !appModel.processingPreviewText.isEmpty {
+                        activityMetaPill("Live preview", systemImage: "text.line.first.and.arrowtriangle.forward", tint: TotalRecGlass.successGreen)
+                    }
+
+                    if stage == .generatingInsights {
+                        insightStopButton
+                    }
+                }
             }
-        } catch {
-            print("[Transcribe][OpenAI] Failed: \(error)")
-            await MainActor.run {
-                status = "OpenAI failed: \(error.localizedDescription)"
-                isTranscribing = false
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .totalRecStaticRoundedRect(cornerRadius: 16, tint: stage.totalRecStatusTint)
+    }
+
+    private func activitySupportText(for stage: SessionStage) -> String {
+        if stage == .generatingInsights, appModel.isStoppingInsightArtifact {
+            return "Stopping the current insight run. The session will unlock as soon as the stream cancels."
+        }
+        if stage == .transcribing, !appModel.processingPreviewText.isEmpty {
+            return "Partial text is updating live below while the transcript is assembled. Session switching stays locked until the run completes."
+        }
+        return stage.totalRecProgressSupportText
+    }
+
+    private func activityMetaPill(_ title: String, systemImage: String, tint: Color) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .totalRecStaticPill(tint: tint)
+    }
+
+    private var insightStopButton: some View {
+        Button {
+            appModel.stopInsightArtifactGeneration()
+        } label: {
+            Label(
+                appModel.isStoppingInsightArtifact ? "Stopping…" : "Stop",
+                systemImage: appModel.isStoppingInsightArtifact ? "hourglass" : "stop.fill"
+            )
+        }
+        .disabled(appModel.isStoppingInsightArtifact)
+        .totalRecGlassButton(tint: TotalRecGlass.recordingRed)
+    }
+
+    private var workflowSectionPicker: some View {
+        Picker("Workflow", selection: $selectedSection) {
+            ForEach(WorkflowSection.allCases) { section in
+                Text(section.rawValue)
+                    .tag(section)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .frame(width: 290)
+    }
+
+    private var transcriptStepPicker: some View {
+        Picker("Transcript Step", selection: $selectedTranscriptStep) {
+            ForEach(TranscriptWorkspaceStep.allCases) { step in
+                Text(step.rawValue)
+                    .tag(step)
+                    .disabled(!isTranscriptStepAvailable(step))
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+    }
+
+    @ViewBuilder
+    private var currentSectionContent: some View {
+        switch selectedSection {
+        case .capture:
+            captureSection
+        case .transcript:
+            transcriptSection
+        case .insights:
+            insightsSection
+        }
+    }
+
+    private func workflowSectionIcon(_ section: WorkflowSection) -> String {
+        switch section {
+        case .capture:
+            return "waveform.circle.fill"
+        case .transcript:
+            return "text.quote"
+        case .insights:
+            return "list.bullet.rectangle.portrait"
+        }
+    }
+
+    private func transcriptStepIcon(_ step: TranscriptWorkspaceStep) -> String {
+        switch step {
+        case .run:
+            return "slider.horizontal.3"
+        case .transcript:
+            return "text.cursor"
+        case .speakers:
+            return "person.2"
+        case .document:
+            return "doc.text"
+        }
+    }
+
+    private func workflowSectionDescription(_ section: WorkflowSection) -> String {
+        switch section {
+        case .capture:
+            return "Record system audio or import a file into a recoverable session."
+        case .transcript:
+            return "Run transcription, correct wording, and clean speaker assignments."
+        case .insights:
+            return "Generate notes and structured summaries from the session transcript."
+        }
+    }
+
+    private func workflowSectionTint(_ section: WorkflowSection) -> Color {
+        switch section {
+        case .capture:
+            return appModel.isRecording ? TotalRecGlass.recordingRed : TotalRecGlass.captureBlue
+        case .transcript:
+            return TotalRecGlass.transcriptViolet
+        case .insights:
+            return TotalRecGlass.insightsGreen
+        }
+    }
+
+    private var providerAccentTint: Color {
+        switch provider {
+        case .openAI:
+            return isOpenAIKeyConfigured ? TotalRecGlass.warningAmber : TotalRecGlass.recordingRed
+        case .tscript:
+            return selectedTScriptModel == nil ? TotalRecGlass.neutralTint : TotalRecGlass.transcriptViolet
+        case .appleOnDevice:
+            return Color(red: 0.28, green: 0.58, blue: 0.62)
+        case .appleCloud:
+            return Color(red: 0.30, green: 0.56, blue: 0.78)
+        }
+    }
+
+    private var ambientAccentTint: Color {
+        if appModel.isRecording {
+            return TotalRecGlass.recordingRed
+        }
+
+        switch provider {
+        case .openAI:
+            return isOpenAIKeyConfigured ? TotalRecGlass.warningAmber : TotalRecGlass.captureBlue
+        case .tscript:
+            return selectedTScriptModel == nil ? TotalRecGlass.neutralTint : TotalRecGlass.transcriptViolet
+        case .appleOnDevice:
+            return Color(red: 0.28, green: 0.58, blue: 0.62)
+        case .appleCloud:
+            return Color(red: 0.30, green: 0.56, blue: 0.78)
+        }
+    }
+
+    private var ambientSecondaryTint: Color {
+        if let stage = appModel.activeSession?.stage, stage.totalRecShowsLiveActivity {
+            return stage.totalRecStatusTint
+        }
+        return TotalRecGlass.neutralTint
+    }
+
+    private func sessionStageTitle(_ stage: SessionStage) -> String {
+        stage.totalRecStatusLabel
+    }
+
+    private func sessionStageIcon(_ stage: SessionStage) -> String {
+        stage.totalRecStatusIcon
+    }
+
+    private func sessionStageTint(_ stage: SessionStage) -> Color {
+        stage.totalRecStatusTint
+    }
+
+    private func detailBadge(_ title: String, systemImage: String, tint: Color) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .foregroundStyle(TotalRecGlass.accentForeground(tint))
+            Text(title)
+                .foregroundStyle(.primary)
+        }
+        .font(.caption.weight(.semibold))
+        .lineLimit(1)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .totalRecGlassPill(tint: tint)
+    }
+
+    private func statusBanner(
+        _ message: String,
+        systemImage: String,
+        tint: Color,
+        dismissAction: (() -> Void)? = nil
+    ) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: systemImage)
+                .foregroundStyle(TotalRecGlass.accentForeground(tint))
+                .padding(.top, 2)
+
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(.primary)
+
+            Spacer()
+
+            if let dismissAction {
+                Button("Dismiss", action: dismissAction)
+                    .totalRecGlassButton()
+                    .font(.caption)
+            }
+        }
+        .padding(12)
+        .totalRecStaticRoundedRect(cornerRadius: 12, tint: tint)
+    }
+
+    private func pageCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            content()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .totalRecStaticPanel(cornerRadius: 18)
+    }
+
+    private func sectionScrollContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 4)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func readinessCard(
+        title: String,
+        subtitle: String,
+        items: [ReadinessItem]
+    ) -> some View {
+        pageCard {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.headline)
+                    Text(subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 220), spacing: 10, alignment: .top)],
+                    alignment: .leading,
+                    spacing: 10
+                ) {
+                    ForEach(items) { item in
+                        readinessTile(item)
+                    }
+                }
             }
         }
     }
 
-    private func generateMeetingNotes() async {
-        guard !transcriptState.displayText.isEmpty else {
-            await MainActor.run {
-                meetingNotesError = "Transcript is empty."
+    private func readinessTile(_ item: ReadinessItem) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: item.systemImage)
+                    .foregroundStyle(item.tint)
+                    .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(item.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
+        .totalRecStaticRoundedRect(cornerRadius: 14, tint: item.tint)
+    }
+
+    private var sessionDiagnosticsCard: some View {
+        pageCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Session Details")
+                    .font(.headline)
+
+                if let error = appModel.activeSession?.lastError, !error.isEmpty {
+                    statusBanner(
+                        error,
+                        systemImage: "exclamationmark.triangle.fill",
+                        tint: TotalRecGlass.warningAmber
+                    )
+                }
+
+                DisclosureGroup(isExpanded: $isSessionDiagnosticsExpanded) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(sessionDiagnosticsItems) { item in
+                            diagnosticRow(item)
+                        }
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    HStack {
+                        Text("Show paths and job details")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Text("\(sessionDiagnosticsItems.count) items")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func diagnosticRow(_ item: DiagnosticItem) -> some View {
+        LabeledContent(item.label) {
+            Text(item.value)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+
+    private func workspaceHero(
+        title: String,
+        description: String,
+        systemImage: String,
+        tint: Color,
+        detail: String? = nil,
+        detailSystemImage: String = "sparkles",
+        detailTint: Color? = nil
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Label {
+                    Text(title)
+                        .font(.title3.bold())
+                } icon: {
+                    Image(systemName: systemImage)
+                        .foregroundStyle(tint)
+                }
+
+                Spacer(minLength: 12)
+
+                if let detail {
+                    detailBadge(detail, systemImage: detailSystemImage, tint: detailTint ?? tint)
+                }
+            }
+
+            Text(description)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var captureSection: some View {
+        sectionScrollContainer {
+            workspaceHero(
+                title: appModel.isRecording ? "Recording" : "Capture",
+                description: "Record system audio or import a file into the current session.",
+                systemImage: appModel.isRecording ? "record.circle.fill" : "waveform.circle.fill",
+                tint: workflowSectionTint(.capture),
+                detail: appModel.audioURL == nil ? nil : "Audio ready\(formattedDurationSuffix)"
+            )
+
+            readinessCard(
+                title: "Capture readiness",
+                subtitle: "Permissions, session safety, and audio availability.",
+                items: captureReadinessItems
+            )
+
+            pageCard {
+                Text("Session Files")
+                    .font(.headline)
+
+                captureActionLayout
+
+                Divider()
+
+                if appModel.isRecording {
+                    statusBanner(
+                        "Recording continues even if you close the main window. Use the explicit stop action here or from the menu bar.",
+                        systemImage: "shield.lefthalf.filled",
+                        tint: TotalRecGlass.captureBlue
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    if let mov = appModel.tempMOVURL {
+                        LabeledContent("Raw capture") {
+                            Text(mov.lastPathComponent)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let audioURL = appModel.audioURL {
+                        LabeledContent("Session audio") {
+                            Text(audioURL.lastPathComponent)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            sessionDiagnosticsCard
+
+            if hasTranscriptDisplayText {
+                pageCard {
+                    Text("Transcript Preview")
+                        .font(.headline)
+
+                    ScrollView {
+                        Text(captureTranscriptPreviewText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .padding(10)
+                            .totalRecReadableInset(cornerRadius: 14)
+                    }
+                    .frame(minHeight: 140, maxHeight: 240)
+                }
+            } else {
+                ContentUnavailableView(
+                    "No Transcript Yet",
+                    systemImage: "waveform",
+                    description: Text("Capture or import audio, then run transcription when the session is ready.")
+                )
+                .frame(maxWidth: .infinity, minHeight: 220)
+            }
+        }
+    }
+
+    private var captureActionLayout: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                captureButtons
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                captureButtons
+            }
+        }
+    }
+
+    private var captureButtons: some View {
+        Group {
+            Button(action: saveAudio) {
+                Label("Save Audio…", systemImage: "square.and.arrow.down")
+            }
+                .totalRecGlassButton()
+                .disabled(appModel.audioURL == nil)
+
+            Button {
+                copyTranscriptAsMarkdown()
+            } label: {
+                Label("Copy Transcript", systemImage: "doc.on.doc")
+            }
+            .totalRecGlassButton()
+            .disabled(!appModel.transcriptState.hasDisplayText)
+
+            Button(action: saveTranscript) {
+                Label("Save Transcript…", systemImage: "square.and.arrow.down")
+            }
+                .totalRecGlassButton()
+                .disabled(appModel.transcriptState.isEmpty)
+        }
+    }
+
+    private var transcriptSection: some View {
+        sectionScrollContainer {
+            transcriptSectionOverview
+            transcriptStepNavigationBar
+            transcriptStepContent
+        }
+    }
+
+    private var transcriptSectionOverview: some View {
+        workspaceHero(
+            title: "Transcript",
+            description: transcriptStepDescription(for: selectedTranscriptStep),
+            systemImage: "text.quote",
+            tint: workflowSectionTint(.transcript),
+            detail: hasTranscriptDisplayText
+                ? "\(appModel.transcriptState.orderedSpeakerLabels.count) speakers"
+                : (appModel.audioURL == nil ? nil : "Audio ready\(formattedDurationSuffix)")
+        )
+    }
+
+    private var transcriptStepNavigationBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Transcript Views")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            transcriptStepPicker
+                .frame(maxWidth: 520, alignment: .leading)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .totalRecStaticRoundedRect(cornerRadius: 16)
+    }
+
+    @ViewBuilder
+    private var transcriptStepContent: some View {
+        transcriptStepView(for: selectedTranscriptStep)
+    }
+
+    @ViewBuilder
+    private func transcriptStepView(for step: TranscriptWorkspaceStep) -> some View {
+        switch step {
+        case .run:
+            transcriptRunStepContent
+        case .transcript:
+            transcriptTranscriptStepContent
+        case .speakers:
+            transcriptSpeakersStepContent
+        case .document:
+            transcriptDocumentStepContent
+        }
+    }
+
+    private var transcriptRunStepContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            transcriptionSetupCard
+            transcriptRunActionCard
+            readinessCard(
+                title: "Transcription readiness",
+                subtitle: "Provider setup, audio availability, and hint quality.",
+                items: transcriptionReadinessItems
+            )
+            sessionDiagnosticsCard
+        }
+    }
+
+    private var transcriptRunActionCard: some View {
+        pageCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(hasTranscriptDisplayText ? "Run Again" : "Run Transcription")
+                    .font(.headline)
+
+                if appModel.audioURL == nil {
+                    Text("Capture or import audio first.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 8) {
+                    Button {
+                        transcribe()
+                    } label: {
+                        if appModel.isTranscribing {
+                            HStack(spacing: 8) {
+                                TotalRecActivitySymbol(
+                                    systemImage: SessionStage.transcribing.totalRecMenuBarIconName,
+                                    tint: SessionStage.transcribing.totalRecStatusTint,
+                                    motion: SessionStage.transcribing.totalRecActivityMotion,
+                                    size: 12,
+                                    weight: .bold
+                                )
+                                Text("Transcribing…")
+                            }
+                        } else {
+                            Text(hasTranscriptDisplayText ? "Re-run Transcription" : "Transcribe Audio")
+                        }
+                    }
+                    .disabled(isTranscriptionActionDisabled)
+                    .totalRecGlassButton(prominent: true)
+                }
+
+                if hasTranscriptDisplayText {
+                    Text("Running again replaces the current transcript for this session.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !appModel.processingPreviewText.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Live Preview")
+                            .font(.headline)
+                        Text(appModel.processingPreviewText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .totalRecReadableInset(cornerRadius: 14)
+                    }
+                }
+            }
+        }
+    }
+
+    private var transcriptTranscriptStepContent: some View {
+        pageCard {
+            if appModel.transcriptState.hasDisplayText {
+                TranscriptEditorView(
+                    transcript: transcriptBinding,
+                    audioURL: appModel.audioURL,
+                    audioDuration: appModel.mixedAudioDuration
+                )
+            } else {
+                transcriptStepUnavailableView(
+                    title: "Transcript editing unavailable",
+                    message: "Run transcription first to populate transcript text before editing wording or applying replacements."
+                )
+            }
+        }
+    }
+
+    private var transcriptSpeakersStepContent: some View {
+        pageCard {
+            if appModel.transcriptState.hasSpeakerLabels {
+                TranscriptSpeakersView(
+                    transcript: transcriptBinding,
+                    audioURL: appModel.audioURL,
+                    audioDuration: appModel.mixedAudioDuration,
+                    suggestionService: nameSuggestionService,
+                    areSuggestionsEnabled: BuildFeatures.nameSuggestionsEnabled && nameSuggestionProvider != .disabled,
+                    suggestionProviderName: nameSuggestionProviderSummary,
+                    onStatusMessage: { message in
+                        appModel.setStatusMessage(message)
+                    }
+                )
+            } else {
+                transcriptStepUnavailableView(
+                    title: "Speaker tools unavailable",
+                    message: "This transcript does not include speaker labels. Run a diarized provider to enable speaker cleanup."
+                )
+            }
+        }
+    }
+
+    private var transcriptDocumentStepContent: some View {
+        pageCard {
+            if appModel.transcriptState.hasDisplayText {
+                TranscriptDocumentView(
+                    transcript: appModel.transcriptState,
+                    onCopyMarkdown: copyTranscriptAsMarkdown,
+                    onSaveTranscript: saveTranscript
+                )
+            } else {
+                transcriptStepUnavailableView(
+                    title: "Transcript document unavailable",
+                    message: "Run transcription first to populate the transcript document and export tools."
+                )
+            }
+        }
+    }
+
+    private func transcriptStepUnavailableView(title: String, message: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var transcriptionSetupCard: some View {
+        pageCard {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 12) {
+                    Text("Transcription Setup")
+                        .font(.headline)
+
+                        Spacer()
+
+                        if provider == .openAI || provider == .tscript {
+                            Button(provider == .openAI ? "Manage API Key" : "Manage Server") {
+                                openAppSettings()
+                            }
+                            .totalRecGlassButton()
+                        }
+                }
+
+                Picker("Transcription Provider", selection: $provider) {
+                    ForEach(TranscriptionProvider.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if provider == .openAI {
+                    openAITranscriptionSettings
+                } else if provider == .tscript {
+                    tScriptTranscriptionSettings
+                } else {
+                    Text(provider == .appleOnDevice
+                         ? "On-device transcription stays local when available."
+                         : "Apple Cloud transcription uses Apple's speech service when needed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var openAITranscriptionSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ViewThatFits(in: .horizontal) {
+                TotalRecGlassCluster(spacing: 14) {
+                    HStack(spacing: 8) {
+                        detailBadge(
+                            isOpenAIKeyConfigured ? "API key ready" : "API key required",
+                            systemImage: isOpenAIKeyConfigured ? "key.fill" : "exclamationmark.triangle.fill",
+                            tint: isOpenAIKeyConfigured ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+                        )
+
+                        detailBadge(
+                            openAIChunkingDisplayName,
+                            systemImage: openAIChunkingStrategy == "none" ? "arrow.up.doc" : "square.split.2x2",
+                            tint: TotalRecGlass.captureBlue
+                        )
+
+                        detailBadge(
+                            knownSpeakerHintCount == 0 ? "No speaker hints" : "\(knownSpeakerHintCount) speaker hints",
+                            systemImage: "person.2.fill",
+                            tint: knownSpeakerHintCount == 0 ? TotalRecGlass.neutralTint : TotalRecGlass.transcriptViolet
+                        )
+
+                        Spacer(minLength: 0)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    detailBadge(
+                        isOpenAIKeyConfigured ? "API key ready" : "API key required",
+                        systemImage: isOpenAIKeyConfigured ? "key.fill" : "exclamationmark.triangle.fill",
+                        tint: isOpenAIKeyConfigured ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+                    )
+
+                    HStack(spacing: 8) {
+                        detailBadge(
+                            openAIChunkingDisplayName,
+                            systemImage: openAIChunkingStrategy == "none" ? "arrow.up.doc" : "square.split.2x2",
+                            tint: TotalRecGlass.captureBlue
+                        )
+
+                        detailBadge(
+                            knownSpeakerHintCount == 0 ? "No speaker hints" : "\(knownSpeakerHintCount) speaker hints",
+                            systemImage: "person.2.fill",
+                            tint: knownSpeakerHintCount == 0 ? TotalRecGlass.neutralTint : TotalRecGlass.transcriptViolet
+                        )
+                    }
+                }
+            }
+
+            if !isOpenAIKeyConfigured {
+                HStack(alignment: .center, spacing: 10) {
+                    Image(systemName: "key.fill")
+                        .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.warningAmber))
+
+                    Text("OpenAI transcription requires an API key stored in Keychain. Use Settings to add or replace it.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button("Open Settings") {
+                        openAppSettings()
+                    }
+                    .totalRecGlassButton()
+                }
+                .padding(12)
+                .totalRecGlassRoundedRect(cornerRadius: 12, tint: TotalRecGlass.warningAmber)
+            } else {
+                Text("OpenAI key is configured and available for diarized transcription.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Upload Strategy")
+                    .font(.subheadline.weight(.semibold))
+                Picker("Upload Chunking", selection: $openAIChunkingStrategy) {
+                    Text("Auto").tag("auto")
+                    Text("Single Upload").tag("none")
+                }
+                .pickerStyle(.segmented)
+
+                Text("Auto splits longer files before upload. Single Upload keeps the run as one file when it fits the provider limits.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            DisclosureGroup(isExpanded: $isKnownSpeakerHintsExpanded) {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(0..<4, id: \.self) { index in
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 10) {
+                                TextField("Name #\(index + 1)", text: $knownSpeakerNamesInputs[index])
+                                    .textFieldStyle(.roundedBorder)
+
+                                TextField("Reference URL, data URI, or local file path", text: $knownSpeakerRefsInputs[index])
+                                    .textFieldStyle(.roundedBorder)
+                            }
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                TextField("Name #\(index + 1)", text: $knownSpeakerNamesInputs[index])
+                                    .textFieldStyle(.roundedBorder)
+
+                                TextField("Reference URL, data URI, or local file path", text: $knownSpeakerRefsInputs[index])
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Text("Optional hints help OpenAI anchor diarization to voices you already know.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Spacer()
+
+                        Button("Clear Hints") {
+                            knownSpeakerNamesInputs = Array(repeating: "", count: 4)
+                            knownSpeakerRefsInputs = Array(repeating: "", count: 4)
+                        }
+                        .font(.caption)
+                        .totalRecGlassButton()
+                    }
+                }
+                .padding(.top, 8)
+            } label: {
+                HStack {
+                    Text("Known Speaker Hints")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text("\(knownSpeakerHintCount)/4 ready")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if hasPartialKnownSpeaker {
+                statusBanner(
+                    "Each speaker hint row needs both a name and a reference. Incomplete rows are ignored until you finish or clear them.",
+                    systemImage: "person.crop.rectangle.stack.fill",
+                    tint: TotalRecGlass.warningAmber
+                )
+            }
+        }
+    }
+
+    private var tScriptTranscriptionSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            let transportItem = tScriptTransportReadinessItem
+            ViewThatFits(in: .horizontal) {
+                TotalRecGlassCluster(spacing: 14) {
+                    HStack(spacing: 8) {
+                        detailBadge(
+                            transportItem.title,
+                            systemImage: transportItem.systemImage,
+                            tint: transportItem.tint
+                        )
+
+                        if let model = selectedTScriptModel {
+                            detailBadge(
+                                model.displayName,
+                                systemImage: "square.stack.3d.up.fill",
+                                tint: model.runtimeAvailable ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+                            )
+                        }
+
+                        if isTScriptModelsLoading {
+                            detailBadge(
+                                "Refreshing models",
+                                systemImage: "arrow.triangle.2.circlepath",
+                                tint: TotalRecGlass.captureBlue
+                            )
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    detailBadge(
+                        transportItem.title,
+                        systemImage: transportItem.systemImage,
+                        tint: transportItem.tint
+                    )
+
+                    HStack(spacing: 8) {
+                        if let model = selectedTScriptModel {
+                            detailBadge(
+                                model.displayName,
+                                systemImage: "square.stack.3d.up.fill",
+                                tint: model.runtimeAvailable ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+                            )
+                        }
+
+                        if isTScriptModelsLoading {
+                            detailBadge(
+                                "Refreshing models",
+                                systemImage: "arrow.triangle.2.circlepath",
+                                tint: TotalRecGlass.captureBlue
+                            )
+                        }
+                    }
+                }
+            }
+
+            if !tScriptBaseURLConfigured {
+                HStack(alignment: .center, spacing: 10) {
+                    Image(systemName: "server.rack")
+                        .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.warningAmber))
+
+                    Text("TScript transcription requires a server base URL in Settings before the app can discover models.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button("Open Settings") {
+                        openAppSettings()
+                    }
+                    .totalRecGlassButton()
+                }
+                .padding(12)
+                .totalRecGlassRoundedRect(cornerRadius: 12, tint: TotalRecGlass.warningAmber)
+            } else {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Server")
+                            .font(.subheadline.weight(.semibold))
+                        Text(normalizedTScriptBaseURL)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button(isTScriptModelsLoading ? "Refreshing…" : "Refresh Models") {
+                        refreshTScriptModels()
+                    }
+                    .totalRecGlassButton()
+                    .disabled(isTScriptModelsLoading)
+                }
+            }
+
+            if let warning = tScriptTransportWarningText {
+                statusBanner(
+                    warning,
+                    systemImage: "exclamationmark.shield.fill",
+                    tint: TotalRecGlass.warningAmber
+                )
+            }
+
+            if let error = tScriptModelsError, !error.isEmpty {
+                statusBanner(
+                    error,
+                    systemImage: "exclamationmark.triangle.fill",
+                    tint: TotalRecGlass.warningAmber
+                )
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Model")
+                    .font(.subheadline.weight(.semibold))
+                Picker("TScript Model", selection: $tScriptConfiguration.selectedModelID) {
+                    if let defaultID = tScriptModelsResponse?.defaultModelID,
+                       let defaultModel = tScriptModelsResponse?.models[defaultID] {
+                        Text("Server Default (\(defaultModel.displayName))").tag("")
+                    } else {
+                        Text("Server Default").tag("")
+                    }
+                    ForEach(tScriptModels) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(tScriptModels.isEmpty)
+
+                if let model = selectedTScriptModel {
+                    Text(model.notes ?? "\(model.engine) (\(model.status ?? "unknown"))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if tScriptModels.isEmpty {
+                    Text("Refresh models to populate the picker from the TScript server registry.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("The server default model will be used if you leave the selection empty.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let model = selectedTScriptModel {
+                tScriptCapabilityEditor(for: model)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tScriptCapabilityEditor(for model: TScriptModel) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if model.acceptsLanguageSelection {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Language")
+                        .font(.subheadline.weight(.semibold))
+                    DeferredCommitTextField("en", text: $tScriptConfiguration.language)
+                        .textFieldStyle(.roundedBorder)
+                    Text("Language is sent only when the selected model supports explicit language selection.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if model.supportsTranslation || model.supportsTimestamps {
+                VStack(alignment: .leading, spacing: 8) {
+                    if model.supportsTranslation {
+                        Toggle("Translate", isOn: $tScriptConfiguration.translate)
+                    }
+                    if model.supportsTimestamps {
+                        Text("Timestamps are requested automatically for models that support timed output so playback stays available in Transcript and Speakers.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if model.availableDiarizationModes.count > 1 {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Diarization")
+                        .font(.subheadline.weight(.semibold))
+                    Picker("Diarization", selection: $tScriptConfiguration.diarizationMode) {
+                        ForEach(model.availableDiarizationModes) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Text("The UI only exposes diarization modes the current model advertises through `/models`.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if effectiveTScriptDiarizationMode != .off && model.supportsStandardDiarization {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Speaker Hints")
+                        .font(.subheadline.weight(.semibold))
+
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 10) {
+                            DeferredCommitTextField("Exact speaker count", text: $tScriptConfiguration.numSpeakers)
+                                .textFieldStyle(.roundedBorder)
+                            DeferredCommitTextField("Min speakers", text: $tScriptConfiguration.minSpeakers)
+                                .textFieldStyle(.roundedBorder)
+                            DeferredCommitTextField("Max speakers", text: $tScriptConfiguration.maxSpeakers)
+                                .textFieldStyle(.roundedBorder)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            DeferredCommitTextField("Exact speaker count", text: $tScriptConfiguration.numSpeakers)
+                                .textFieldStyle(.roundedBorder)
+                            DeferredCommitTextField("Min speakers", text: $tScriptConfiguration.minSpeakers)
+                                .textFieldStyle(.roundedBorder)
+                            DeferredCommitTextField("Max speakers", text: $tScriptConfiguration.maxSpeakers)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+
+                    Text("Optional pyannote hints. Leave these blank unless you want to constrain diarization to a known speaker count or range.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if model.isWhisperEngine {
+                DisclosureGroup(isExpanded: $isTScriptAdvancedOptionsExpanded) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Flash Attention", isOn: $tScriptConfiguration.advanced.flashAttention)
+                        Toggle("Split On Word", isOn: $tScriptConfiguration.advanced.splitOnWord)
+
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 10) {
+                                DeferredCommitTextField("Threads", text: $tScriptConfiguration.advanced.threads)
+                                    .textFieldStyle(.roundedBorder)
+                                DeferredCommitTextField("Processors", text: $tScriptConfiguration.advanced.processors)
+                                    .textFieldStyle(.roundedBorder)
+                                DeferredCommitTextField("Beam Size", text: $tScriptConfiguration.advanced.beamSize)
+                                    .textFieldStyle(.roundedBorder)
+                                DeferredCommitTextField("Best Of", text: $tScriptConfiguration.advanced.bestOf)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                DeferredCommitTextField("Threads", text: $tScriptConfiguration.advanced.threads)
+                                    .textFieldStyle(.roundedBorder)
+                                DeferredCommitTextField("Processors", text: $tScriptConfiguration.advanced.processors)
+                                    .textFieldStyle(.roundedBorder)
+                                DeferredCommitTextField("Beam Size", text: $tScriptConfiguration.advanced.beamSize)
+                                    .textFieldStyle(.roundedBorder)
+                                DeferredCommitTextField("Best Of", text: $tScriptConfiguration.advanced.bestOf)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 10) {
+                                DeferredCommitTextField("Max Context", text: $tScriptConfiguration.advanced.maxContext)
+                                    .textFieldStyle(.roundedBorder)
+                                DeferredCommitTextField("Max Len", text: $tScriptConfiguration.advanced.maxLen)
+                                    .textFieldStyle(.roundedBorder)
+                                DeferredCommitTextField("Word Threshold", text: $tScriptConfiguration.advanced.wordThreshold)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                DeferredCommitTextField("Max Context", text: $tScriptConfiguration.advanced.maxContext)
+                                    .textFieldStyle(.roundedBorder)
+                                DeferredCommitTextField("Max Len", text: $tScriptConfiguration.advanced.maxLen)
+                                    .textFieldStyle(.roundedBorder)
+                                DeferredCommitTextField("Word Threshold", text: $tScriptConfiguration.advanced.wordThreshold)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+
+                        Text("These advanced options map directly to the documented whisper.cpp passthrough fields. Leave them blank to use server defaults.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Text("Advanced Whisper Options")
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+        }
+    }
+
+    private func defaultTranscriptStep(for transcript: TranscriptState) -> TranscriptWorkspaceStep {
+        if transcript.hasDisplayText {
+            return .transcript
+        }
+        return .run
+    }
+
+    private func normalizeSelectedTranscriptStep(preferred: TranscriptWorkspaceStep? = nil) {
+        let candidate = preferred ?? selectedTranscriptStep
+        if availableTranscriptSteps.contains(candidate) {
+            selectedTranscriptStep = candidate
+        } else {
+            selectedTranscriptStep = defaultTranscriptStep
+        }
+    }
+
+    private func transcriptStepDescription(for step: TranscriptWorkspaceStep) -> String {
+        switch step {
+        case .run:
+            return "Configure the provider, model, and per-run options before you transcribe or re-run this session."
+        case .transcript:
+            return "Correct wording, apply literal replacements, and play timed clips when they are available."
+        case .speakers:
+            return "Focus on aliases, filtered speaker playback, reassignment, and explicit consolidation."
+        case .document:
+            return "Read the final transcript as a document and export the current state once cleanup is complete."
+        }
+    }
+
+    private var insightsSection: some View {
+        sectionScrollContainer {
+            workspaceHero(
+                title: "Insights",
+                description: "Turn the transcript into reusable summaries, decision logs, action lists, and other workflow-specific outputs.",
+                systemImage: "list.bullet.rectangle.portrait",
+                tint: workflowSectionTint(.insights),
+                detail: hasTranscriptDisplayText ? "Transcript ready" : "Transcript required",
+                detailSystemImage: hasTranscriptDisplayText ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
+                detailTint: hasTranscriptDisplayText ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
+            )
+
+            readinessCard(
+                title: "Insights readiness",
+                subtitle: "Transcript, provider setup, and current artifact state.",
+                items: insightsReadinessItems
+            )
+
+            insightsPanel
+        }
+    }
+
+    private var insightsPanel: some View {
+        TranscriptSurfacePanel(
+            title: "Insight Workflow",
+            subtitle: "Generate a transcript-derived artifact for the current session."
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        insightActionButtons
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        insightActionButtons
+                    }
+                }
+
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        detailBadge(
+                            defaultInsightProvider.displayName,
+                            systemImage: "cpu",
+                            tint: workflowSectionTint(.insights)
+                        )
+
+                        detailBadge(
+                            displayName(for: resolvedInsightModelID, provider: defaultInsightProvider),
+                            systemImage: "square.stack.3d.up",
+                            tint: TotalRecGlass.transcriptViolet
+                        )
+
+                        Spacer(minLength: 0)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        detailBadge(
+                            defaultInsightProvider.displayName,
+                            systemImage: "cpu",
+                            tint: workflowSectionTint(.insights)
+                        )
+
+                        detailBadge(
+                            displayName(for: resolvedInsightModelID, provider: defaultInsightProvider),
+                            systemImage: "square.stack.3d.up",
+                            tint: TotalRecGlass.transcriptViolet
+                        )
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Workflow")
+                                .font(.subheadline.weight(.semibold))
+                            Picker("Workflow", selection: $selectedInsightWorkflow) {
+                                ForEach(InsightWorkflow.allCases) { workflow in
+                                    Text(workflow.displayName).tag(workflow)
+                                }
+                            }
+                            .pickerStyle(.menu)
+
+                            Text(selectedInsightWorkflow.description)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Toggle(isOn: $useCustomInsightsPrompt.animation()) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Customize Prompt")
+                                    .font(.subheadline)
+                                Text("Switch this on to override the workflow template. Keep the {{TRANSCRIPT}} token where transcript text should be inserted.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .toggleStyle(.switch)
+
+                        if useCustomInsightsPrompt {
+                            TextEditor(text: $customInsightsPrompt)
+                                .font(.body.monospaced())
+                                .frame(minHeight: 180)
+                                .padding(10)
+                                .totalRecReadableInset(cornerRadius: 14)
+
+                            HStack {
+                                Text("Start from the template, then tailor it to your workflow.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button("Reset to template") {
+                                    customInsightsPrompt = selectedInsightWorkflow.promptTemplate
+                                }
+                                .font(.caption)
+                            }
+                        } else {
+                            Text("Using the \(selectedInsightWorkflow.displayName.lowercased()) workflow template.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let error = appModel.insightRunError, !error.isEmpty {
+                        Text(error)
+                            .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.recordingRed))
+                            .font(.footnote)
+                    }
+
+                    if appModel.isGeneratingInsightArtifact || !appModel.insightStreamingText.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 10) {
+                                Label("Live Output", systemImage: "text.append")
+                                    .font(.subheadline.weight(.semibold))
+                                if appModel.isGeneratingInsightArtifact {
+                                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                                        if let elapsed = appModel.insightRunElapsedText {
+                                            Text(elapsed)
+                                                .font(.caption.monospacedDigit())
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                } else if appModel.insightArtifact != nil {
+                                    Text("Unsaved partial output")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(TotalRecGlass.accentForeground(TotalRecGlass.warningAmber))
+                                }
+                            }
+
+                            artifactPreview(
+                                title: appModel.isGeneratingInsightArtifact ? "Streaming artifact" : "Partial run output",
+                                subtitle: appModel.isGeneratingInsightArtifact
+                                    ? "The new artifact is streaming now. The saved artifact stays unchanged until this run completes."
+                                    : "This output was not saved because the last run did not complete.",
+                                content: appModel.insightStreamingText
+                            )
+                        }
+                    }
+
+                    if appModel.isGeneratingInsightArtifact, let insightArtifact = appModel.insightArtifact {
+                        artifactPreview(
+                            title: "Last saved artifact",
+                            subtitle: "\(insightArtifact.workflow.displayName) from \(insightArtifact.generatedAt.formatted(date: .abbreviated, time: .shortened))",
+                            content: insightArtifact.content
+                        )
+                    } else if let insightArtifact = appModel.insightArtifact {
+                        artifactPreview(
+                            title: insightArtifact.title,
+                            subtitle: artifactMetadataSummary(for: insightArtifact),
+                            content: insightArtifact.content
+                        )
+                    } else if appModel.insightStreamingText.isEmpty {
+                        Text("No insight artifact yet. Generate one to see a workflow-specific summary of this transcript.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var insightActionButtons: some View {
+        Group {
+            if appModel.isGeneratingInsightArtifact {
+                Button {
+                    appModel.stopInsightArtifactGeneration()
+                } label: {
+                    Label(
+                        appModel.isStoppingInsightArtifact ? "Stopping…" : "Stop",
+                        systemImage: appModel.isStoppingInsightArtifact ? "hourglass" : "stop.fill"
+                    )
+                }
+                .disabled(appModel.isStoppingInsightArtifact)
+                .totalRecGlassButton(tint: TotalRecGlass.recordingRed)
+            } else {
+                Button("Generate Artifact") {
+                    runInsightsGeneration()
+                }
+                .disabled(isInsightActionDisabled)
+                .totalRecGlassButton(prominent: true)
+            }
+
+            Button {
+                copyInsightArtifactToClipboard()
+            } label: {
+                Label("Copy Artifact", systemImage: "doc.on.doc")
+            }
+            .totalRecGlassButton()
+            .disabled(appModel.insightArtifact == nil)
+
+            Button {
+                saveInsightArtifact()
+            } label: {
+                Label("Save Artifact…", systemImage: "square.and.arrow.down")
+            }
+            .totalRecGlassButton()
+            .disabled(appModel.insightArtifact == nil)
+        }
+    }
+
+    private func artifactPreview(title: String, subtitle: String, content: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ScrollView {
+                Text(content)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(12)
+                    .totalRecReadableInset(cornerRadius: 14)
+            }
+            .frame(minHeight: 180)
+        }
+    }
+
+    private func artifactMetadataSummary(for artifact: InsightArtifact) -> String {
+        "\(artifact.workflow.displayName) • \(artifact.generatedAt.formatted(date: .abbreviated, time: .shortened)) • \(artifact.provider.displayName) • \(artifact.modelID)"
+    }
+
+    private func runInsightsGeneration() {
+        let trimmedPrompt = customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if useCustomInsightsPrompt && trimmedPrompt.isEmpty {
+            appModel.insightRunError = "Enter a custom prompt or disable the custom prompt override."
+            appModel.setStatusMessage("Insight generation failed: Custom prompt required.")
             return
         }
 
-        await MainActor.run {
-            isGeneratingMeetingNotes = true
-            meetingNotesError = nil
-            status = "Generating meeting notes..."
+        if !isAPIKeyConfigured(for: defaultInsightProvider) {
+            appModel.insightRunError = "\(defaultInsightProvider.displayName) API key missing."
+            appModel.setStatusMessage("Insight generation failed: \(defaultInsightProvider.displayName) API key missing.")
+            openAppSettings()
+            return
         }
 
-        do {
-            let trimmedPrompt = useCustomInsightsPrompt ? customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines) : nil
-            if useCustomInsightsPrompt && (trimmedPrompt ?? "").isEmpty {
-                await MainActor.run {
-                    meetingNotesError = "Enter a custom prompt or disable the option."
-                    status = "Meeting notes failed: Custom prompt required."
-                    isGeneratingMeetingNotes = false
-                }
-                return
-            }
+        persistInsightEditorState()
 
-            let notes = try await MeetingNotesService().generateNotes(from: transcriptState, promptOverride: trimmedPrompt)
-            await MainActor.run {
-                meetingNotes = notes
-                status = "Meeting notes ready."
-                selectedSection = .insights
-                isGeneratingMeetingNotes = false
+        appModel.startInsightArtifactGeneration()
+    }
+
+    private func syncInsightEditorState(from settings: InsightSettings?) {
+        let resolved = settings ?? InsightSettings(selectedWorkflow: defaultInsightWorkflow)
+        selectedInsightWorkflow = resolved.selectedWorkflow
+        useCustomInsightsPrompt = resolved.useCustomPrompt
+        customInsightsPrompt = resolved.customPrompt
+    }
+
+    private func persistInsightEditorState() {
+        guard appModel.activeSession != nil else { return }
+        appModel.updateInsightSettings(
+            InsightSettings(
+                selectedWorkflow: selectedInsightWorkflow,
+                useCustomPrompt: useCustomInsightsPrompt,
+                customPrompt: customInsightsPrompt
+            )
+        )
+    }
+
+    private func transcribe() {
+        guard appModel.audioURL != nil else { return }
+
+        if provider == .openAI && !isOpenAIKeyConfigured {
+            appModel.setStatusMessage("OpenAI API key missing. Open Settings to configure it.")
+            openAppSettings()
+            return
+        }
+
+        if provider == .openAI && hasPartialKnownSpeaker {
+            appModel.setStatusMessage("Please provide both a Name and a Sample for each known speaker, or clear the incomplete rows.")
+            return
+        }
+
+        if provider == .tscript && !tScriptBaseURLConfigured {
+            appModel.setStatusMessage("TScript base URL missing. Open Settings to configure it.")
+            openAppSettings()
+            return
+        }
+
+        if provider == .tscript && tScriptRequiresHTTPOverride {
+            appModel.setStatusMessage(tScriptTransportReadinessItem.detail)
+            openAppSettings()
+            return
+        }
+
+        if provider == .tscript, let model = selectedTScriptModel, !model.runtimeAvailable {
+            appModel.setStatusMessage("Selected TScript model is unavailable. Refresh models or choose another model.")
+            return
+        }
+
+        pendingTranscriptNavigationAfterTranscription = true
+        normalizeSelectedTranscriptStep(preferred: .run)
+
+        Task {
+            await appModel.transcribe(
+                TranscriptionRunConfiguration(
+                    provider: provider,
+                    openAIAPIKey: openAIAPIKey,
+                    openAIChunkingStrategy: openAIChunkingStrategy,
+                    knownSpeakers: preparedKnownSpeakers,
+                    tscript: provider == .tscript
+                        ? TScriptTranscriptionRunConfiguration(
+                            baseURL: tScriptConfiguration.baseURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                            configuration: effectiveTScriptConfigurationForRun()
+                        )
+                        : nil
+                )
+            )
+        }
+    }
+
+    private func effectiveTScriptConfigurationForRun() -> TScriptConfiguration {
+        guard let model = selectedTScriptModel else {
+            return tScriptConfiguration
+        }
+
+        var configuration = tScriptConfiguration
+        configuration.diarizationMode = model.normalizedDiarizationMode(configuration.diarizationMode)
+        if !model.supportsTranslation {
+            configuration.translate = false
+        }
+        return configuration
+    }
+
+    private func refreshTScriptModels() {
+        let baseURL = tScriptConfiguration.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !baseURL.isEmpty else {
+            tScriptModelsError = "Enter a TScript base URL in Settings before loading models."
+            return
+        }
+        guard !isTScriptModelsLoading else { return }
+
+        isTScriptModelsLoading = true
+        tScriptModelsError = nil
+
+        Task {
+            do {
+                let response = try await TScriptTranscriber().fetchModelRegistry(configuration: tScriptConfiguration)
+                await MainActor.run {
+                    isTScriptModelsLoading = false
+                    tScriptModelsResponse = response
+                    tScriptModelsError = nil
+                    normalizeTScriptSelection(using: response)
+                }
+            } catch {
+                await MainActor.run {
+                    isTScriptModelsLoading = false
+                    tScriptModelsResponse = nil
+                    tScriptModelsError = error.localizedDescription
+                }
             }
+        }
+    }
+
+    private func handleTScriptConfigurationChange(oldValue: TScriptConfiguration, newValue: TScriptConfiguration) {
+        do {
+            try AIConfigManager.shared.updateTScriptConfiguration(newValue)
         } catch {
-            await MainActor.run {
-                meetingNotesError = error.localizedDescription
-                status = "Meeting notes failed: \(error.localizedDescription)"
-                isGeneratingMeetingNotes = false
+            appModel.setStatusMessage("Failed to save TScript settings: \(error.localizedDescription)")
+        }
+
+        let oldBaseURL = oldValue.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newBaseURL = newValue.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if oldBaseURL != newBaseURL {
+            tScriptModelsResponse = nil
+            tScriptModelsError = nil
+        }
+    }
+
+    private func normalizeTScriptSelection(using response: TScriptModelsResponse) {
+        let configuredID = tScriptConfiguration.selectedModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let availableModelIDs = response.allModels.filter(\.runtimeAvailable).map(\.id)
+        let fallbackID = response.defaultModelID.flatMap { response.models[$0]?.runtimeAvailable == true ? $0 : nil }
+            ?? availableModelIDs.first
+            ?? response.allModels.first?.id
+
+        if !configuredID.isEmpty, response.models[configuredID] == nil {
+            tScriptConfiguration.selectedModelID = fallbackID ?? ""
+        }
+
+        guard let model = selectedTScriptModel else { return }
+        normalizeTScriptDiarizationSelection(for: model)
+        if !model.supportsTranslation {
+            tScriptConfiguration.translate = false
+        }
+    }
+
+    private func normalizeTScriptDiarizationSelection(for model: TScriptModel) {
+        let normalized = model.normalizedDiarizationMode(tScriptConfiguration.diarizationMode)
+        if tScriptConfiguration.diarizationMode != normalized {
+            tScriptConfiguration.diarizationMode = normalized
+        }
+    }
+
+    private func saveAudio() {
+        guard let url = appModel.audioURL else { return }
+#if os(macOS)
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType.audio]
+        panel.nameFieldStringValue = url.lastPathComponent
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.begin { response in
+            if response == .OK, let destination = panel.url {
+                do {
+                    if FileManager.default.fileExists(atPath: destination.path) {
+                        try FileManager.default.removeItem(at: destination)
+                    }
+                    try FileManager.default.copyItem(at: url, to: destination)
+                } catch {
+                    appModel.setStatusMessage("Save failed: \(error.localizedDescription)")
+                }
             }
+        }
+#endif
+    }
+
+    private func saveTranscript() {
+        guard !appModel.transcriptState.isEmpty else { return }
+#if os(macOS)
+        let stateToSave = appModel.transcriptState
+        let availableFormats = transcriptExportFormats(for: stateToSave)
+        let panel = NSSavePanel()
+        let coordinator = TranscriptSavePanelCoordinator(
+            panel: panel,
+            formats: availableFormats,
+            hasSpeakerLabels: stateToSave.hasSpeakerLabels
+        )
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.title = "Save Transcript"
+        panel.prompt = "Save"
+        panel.showsTagField = false
+        panel.allowedContentTypes = availableFormats.map(\.contentType)
+        panel.delegate = coordinator
+        if #available(macOS 15.0, *) {
+            panel.showsContentTypes = availableFormats.count > 1
+            panel.currentContentType = availableFormats[0].contentType
+        }
+        panel.nameFieldStringValue = availableFormats[0].suggestedFilename(hasSpeakerLabels: stateToSave.hasSpeakerLabels)
+        panel.begin { response in
+            if response == .OK, let destination = panel.url {
+                do {
+                    try writeTranscript(stateToSave, to: destination, format: coordinator.selectedFormat)
+                } catch {
+                    appModel.setStatusMessage("Save failed: \(error.localizedDescription)")
+                }
+            }
+        }
+#endif
+    }
+
+    private func copyTranscriptAsMarkdown() {
+        guard appModel.transcriptState.hasDisplayText else { return }
+        let markdown = TranscriptRenderer(transcript: appModel.transcriptState).markdown()
+        copyStringToClipboard(markdown, successMessage: "Transcript copied to clipboard.")
+    }
+
+    private func copyInsightArtifactToClipboard() {
+        guard let artifact = appModel.insightArtifact, artifact.hasContent else { return }
+        copyStringToClipboard(artifact.content, successMessage: "Artifact copied to clipboard.")
+    }
+
+    private func copyStringToClipboard(_ string: String, successMessage: String) {
+#if os(macOS)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(string, forType: .string)
+        appModel.setStatusMessage(successMessage)
+#endif
+    }
+
+    private func transcriptExportFormats(for transcript: TranscriptState) -> [TranscriptExportFormat] {
+        var formats: [TranscriptExportFormat] = [.plainText, .json]
+        if transcript.hasTimedSegments {
+            formats.append(contentsOf: [.webVTT, .srt])
+        }
+        return formats
+    }
+
+    private func writeTranscript(_ transcript: TranscriptState, to destination: URL, format: TranscriptExportFormat) throws {
+        let renderer = TranscriptRenderer(transcript: transcript)
+        switch format {
+        case .json:
+            let data = try renderer.json()
+            try data.write(to: destination)
+        case .plainText:
+            let data = transcript.plainTextExport.data(using: .utf8) ?? Data()
+            try data.write(to: destination)
+        case .webVTT:
+            try renderer.captions(format: .webVTT).write(to: destination, atomically: true, encoding: .utf8)
+        case .srt:
+            try renderer.captions(format: .srt).write(to: destination, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func saveInsightArtifact() {
+        guard let artifact = appModel.insightArtifact, artifact.hasContent else { return }
+#if os(macOS)
+        let availableFormats = InsightArtifactExportFormat.allCases
+        let panel = NSSavePanel()
+        let coordinator = InsightArtifactSavePanelCoordinator(
+            panel: panel,
+            formats: availableFormats,
+            artifact: artifact
+        )
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.title = "Save Artifact"
+        panel.prompt = "Save"
+        panel.showsTagField = false
+        panel.allowedContentTypes = availableFormats.map(\.contentType)
+        panel.delegate = coordinator
+        if #available(macOS 15.0, *) {
+            panel.showsContentTypes = availableFormats.count > 1
+            panel.currentContentType = availableFormats[0].contentType
+        }
+        panel.nameFieldStringValue = availableFormats[0].suggestedFilename(for: artifact)
+        panel.begin { response in
+            if response == .OK, let destination = panel.url {
+                do {
+                    try writeInsightArtifact(artifact, to: destination, format: coordinator.selectedFormat)
+                } catch {
+                    appModel.setStatusMessage("Save failed: \(error.localizedDescription)")
+                }
+            }
+        }
+#endif
+    }
+
+    private func writeInsightArtifact(
+        _ artifact: InsightArtifact,
+        to destination: URL,
+        format: InsightArtifactExportFormat
+    ) throws {
+        switch format {
+        case .plainText:
+            try artifact.content.write(to: destination, atomically: true, encoding: .utf8)
+        case .json:
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(artifact)
+            try data.write(to: destination)
         }
     }
 
     private func importAudioFromFileSystem() {
-        guard !isImportingAudio else {
-            status = "Audio import already in progress."
+        guard !appModel.isImportingAudio else { return }
+        guard !appModel.isRecording else {
+            appModel.setStatusMessage("Stop recording before importing audio.")
             return
         }
-        guard !isRecording else {
-            status = "Stop recording before importing audio."
-            return
-        }
-        #if os(macOS)
+#if os(macOS)
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [UTType.audio]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.begin { response in
             if response == .OK, let url = panel.url {
-                Task { await performLocalAudioImport(url) }
+                Task { await appModel.importAudioFromFileSystem(url) }
             }
         }
-        #else
-        status = "File import is only supported on macOS."
-        #endif
+#else
+        appModel.setStatusMessage("File import is only supported on macOS.")
+#endif
     }
 
     private func beginURLImport(from rawString: String) {
         let trimmed = rawString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            status = "Enter a valid audio URL."
+            appModel.setStatusMessage("Enter a valid audio URL.")
             return
         }
         guard let remoteURL = URL(string: trimmed),
               let scheme = remoteURL.scheme?.lowercased(),
-              scheme == "https" || scheme == "http" else {
-            status = "Unsupported audio URL. Use http or https."
+              scheme == "http" || scheme == "https" else {
+            appModel.setStatusMessage("Unsupported audio URL. Use http or https.")
             return
         }
+
         showURLImportSheet = false
         importURLString = ""
-        Task { await performRemoteAudioImport(remoteURL) }
+        Task { await appModel.importAudioFromRemoteURL(remoteURL) }
     }
 
-    private func performLocalAudioImport(_ sourceURL: URL) async {
-        await MainActor.run {
-            isImportingAudio = true
-            status = "Importing audio..."
-        }
-        do {
-            let ext = preferredExtension(from: sourceURL)
-            let dest = FileManager.default.temporaryDirectory
-                .appendingPathComponent("totalrec-import-\(UUID().uuidString)")
-                .appendingPathExtension(ext)
-            if FileManager.default.fileExists(atPath: dest.path) {
-                try FileManager.default.removeItem(at: dest)
-            }
-            try FileManager.default.copyItem(at: sourceURL, to: dest)
-            await MainActor.run {
-                applyImportedAudio(at: dest, description: sourceURL.lastPathComponent)
-            }
-        } catch {
-            await MainActor.run {
-                status = "Audio import failed: \(error.localizedDescription)"
-            }
-        }
-        await MainActor.run { isImportingAudio = false }
-    }
-
-    private func performRemoteAudioImport(_ remoteURL: URL) async {
-        await MainActor.run {
-            isImportingAudio = true
-            status = "Downloading audio..."
-        }
-        do {
-            let (tempFile, response) = try await URLSession.shared.download(from: remoteURL)
-            let ext = preferredExtension(from: remoteURL, fallback: extensionFromResponse(response) ?? "m4a")
-            let dest = FileManager.default.temporaryDirectory
-                .appendingPathComponent("totalrec-import-\(UUID().uuidString)")
-                .appendingPathExtension(ext)
-            if FileManager.default.fileExists(atPath: dest.path) {
-                try FileManager.default.removeItem(at: dest)
-            }
-            try FileManager.default.moveItem(at: tempFile, to: dest)
-            await MainActor.run {
-                let description = remoteURL.lastPathComponent.isEmpty ? (remoteURL.host ?? "Remote audio") : remoteURL.lastPathComponent
-                applyImportedAudio(at: dest, description: description)
-            }
-        } catch {
-            await MainActor.run {
-                status = "Audio import failed: \(error.localizedDescription)"
-            }
-        }
-        await MainActor.run { isImportingAudio = false }
-    }
-
-    @MainActor
-    private func applyImportedAudio(at url: URL, description: String) {
-        mixedM4AURL = url
-        tempMOVURL = nil
-        transcriptState = TranscriptState()
-        transcript = ""
-        lastTranscriptCount = 0
-        status = "Imported audio: \(description)"
+    private func toggleRecordingFromSidebar() {
         selectedSection = .capture
-        updateMixedAudioDuration(for: url)
-    }
-
-    private func preferredExtension(from url: URL, fallback: String = "m4a") -> String {
-        let ext = url.pathExtension
-        return ext.isEmpty ? fallback : ext
-    }
-
-    private func extensionFromResponse(_ response: URLResponse?) -> String? {
-        guard let suggested = response?.suggestedFilename else { return nil }
-        let ext = URL(fileURLWithPath: suggested).pathExtension
-        return ext.isEmpty ? nil : ext
-    }
-
-    private func formattedDurationSuffix() -> String {
-        guard let duration = mixedAudioDuration else { return "" }
-        let totalSeconds = Int(duration.rounded())
-        let minutes = totalSeconds / 60
-        let seconds = totalSeconds % 60
-        return String(format: " (~%d:%02d)", minutes, seconds)
-    }
-
-    private func updateMixedAudioDuration(for url: URL) {
-#if os(macOS)
-        Task {
-            let asset = AVURLAsset(url: url)
-            do {
-                let seconds = try await asset.load(.duration).seconds
-                await MainActor.run { mixedAudioDuration = seconds }
-            } catch {
-                await MainActor.run { mixedAudioDuration = nil }
-            }
+        if appModel.isRecording {
+            Task { await appModel.stopRecording() }
+        } else if appModel.hasSessionContent {
+            showStartFreshRecordingPrompt = true
+        } else {
+            appModel.startRecording()
         }
-#else
-        mixedAudioDuration = nil
-#endif
-    }
-
-    private func startRecording() {
-        status = "Preparing recording..."
-        transcript = ""
-        transcriptState = TranscriptState()
-        mixedM4AURL = nil
-        mixedAudioDuration = nil
-
-        let tmp = FileManager.default.temporaryDirectory
-        let movURL = tmp.appendingPathComponent("totalrec-\(UUID().uuidString).mov")
-        tempMOVURL = movURL
-
-        Task {
-            do {
-                try await recorder.startRecording(
-                    to: movURL,
-                    onPermissionNeeded: { permissionAlert = true }
-                )
-                await MainActor.run {
-                    isRecording = true
-                    status = "Recording (system + mic)..."
-                }
-            } catch {
-                await MainActor.run {
-                    status = "Failed to start: \(error.localizedDescription)"
-                    isRecording = false
-                }
-            }
-        }
-    }
-
-    private func stopRecording() {
-        status = "Stopping..."
-        recorder.stopRecording { result in
-            switch result {
-            case .success:
-                status = "Stopped. Mixing down..."
-                mixDown()
-            case .failure(let error):
-                status = "Stop failed: \(error.localizedDescription)"
-            }
-            isRecording = false
-        }
-    }
-
-    private func mixDown() {
-        guard let mov = tempMOVURL else { return }
-        status = "Mixing down..."
-
-        let tmp = FileManager.default.temporaryDirectory
-        let m4aURL = tmp.appendingPathComponent("totalrec-\(UUID().uuidString).m4a")
-
-        Mixdown.toM4A(
-            sourceMOV: mov,
-            outputM4A: m4aURL,
-            systemGain: systemGain,
-            micGain: micGain
-        ) { result in
-            switch result {
-            case .success(let url):
-                mixedM4AURL = url
-                status = "Mixdown complete: \(url.lastPathComponent)"
-                updateMixedAudioDuration(for: url)
-            case .failure(let error):
-                status = "Mixdown failed: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func transcribe() {
-        guard let audioURL = mixedM4AURL else { return }
-
-        status = "Transcribing..."
-
-        isTranscribing = true
-        transcript = ""
-        transcriptState = TranscriptState()
-        lastTranscriptCount = 0
-
-        switch provider {
-        case .appleOnDevice, .appleCloud:
-            let onDevice = (provider == .appleOnDevice)
-            transcriber.transcribeFile(
-                at: audioURL,
-                onDevicePreferred: onDevice,
-                onProgress: { partial in
-                    DispatchQueue.main.async {
-                        if partial.count >= lastTranscriptCount {
-                            let startIndex = partial.index(partial.startIndex, offsetBy: lastTranscriptCount)
-                            let delta = String(partial[startIndex...])
-                            if !delta.isEmpty { transcriptState.appendToRawText(delta) }
-                            lastTranscriptCount = partial.count
-                        } else {
-                            transcriptState.updateRawText(partial)
-                            lastTranscriptCount = partial.count
-                        }
-                    }
-                },
-                completion: { result in
-                    DispatchQueue.main.async {
-                        switch result {
-                        case .success(let full):
-                            if full.count >= lastTranscriptCount {
-                                let startIndex = full.index(full.startIndex, offsetBy: lastTranscriptCount)
-                                let delta = String(full[startIndex...])
-                                if !delta.isEmpty { transcriptState.appendToRawText(delta) }
-                                lastTranscriptCount = full.count
-                            }
-                            transcript = full
-                            status = "Transcription complete. (Apple)"
-                            selectedSection = .transcript
-                        case .failure(let error):
-                            status = "Transcription failed: \(error.localizedDescription)"
-                        }
-                        isTranscribing = false
-                    }
-                }
-            )
-
-        case .openAI:
-            if openAIAPIKey.isEmpty {
-                status = "OpenAI API key missing. Enter it above."
-                isTranscribing = false
-                return
-            }
-            if hasPartialKnownSpeaker {
-                status = "Please provide both a Name and a Sample for each known speaker, or clear the incomplete rows."
-                isTranscribing = false
-                return
-            }
-            Task { await transcribeWithOpenAI(audioURL: audioURL) }
-        }
-    }
-
-    // MARK: - Save helpers
-    private func saveAudio() {
-        guard let url = mixedM4AURL else { return }
-        #if os(macOS)
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType.mpeg4Audio]
-        panel.nameFieldStringValue = url.lastPathComponent
-        panel.canCreateDirectories = true
-        panel.isExtensionHidden = false
-        panel.begin { response in
-            if response == .OK, let dest = panel.url {
-                do {
-                    if FileManager.default.fileExists(atPath: dest.path) {
-                        try FileManager.default.removeItem(at: dest)
-                    }
-                    try FileManager.default.copyItem(at: url, to: dest)
-                } catch {
-                    DispatchQueue.main.async { status = "Save failed: \(error.localizedDescription)" }
-                }
-            }
-        }
-        #endif
-    }
-
-    private func saveTranscript(as format: TranscriptExportFormat) {
-        guard !transcriptState.isEmpty else { return }
-        #if os(macOS)
-        let stateToSave = transcriptState
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [format.contentType]
-        panel.nameFieldStringValue = format.suggestedFilename(hasSpeakerLabels: stateToSave.hasSpeakerLabels)
-        panel.canCreateDirectories = true
-        panel.isExtensionHidden = false
-        panel.begin { response in
-            if response == .OK, let dest = panel.url {
-                do {
-                    switch format {
-                    case .json:
-                        let encoder = JSONEncoder()
-                        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                        let data = try encoder.encode(stateToSave)
-                        try data.write(to: dest)
-                    case .plainText:
-                        let data = stateToSave.plainTextExport.data(using: .utf8) ?? Data()
-                        try data.write(to: dest)
-                    case .webVTT:
-                        let renderer = TranscriptRenderer(transcript: stateToSave)
-                        let text = renderer.captions(format: .webVTT)
-                        try text.write(to: dest, atomically: true, encoding: .utf8)
-                    case .srt:
-                        let renderer = TranscriptRenderer(transcript: stateToSave)
-                        let text = renderer.captions(format: .srt)
-                        try text.write(to: dest, atomically: true, encoding: .utf8)
-                    }
-                } catch {
-                    DispatchQueue.main.async { status = "Save failed: \(error.localizedDescription)" }
-                }
-            }
-        }
-        #endif
-    }
-
-    private enum MeetingNotesExportFormat {
-        case plainText
-        case json
-
-        var displayName: String {
-            switch self {
-            case .plainText: return "notes.txt"
-            case .json: return "notes.json"
-            }
-        }
-
-        var contentType: UTType {
-            switch self {
-            case .plainText: return .plainText
-            case .json: return .json
-            }
-        }
-    }
-
-    private func saveMeetingNotes(as format: MeetingNotesExportFormat) {
-        guard !meetingNotes.isEmpty else { return }
-        #if os(macOS)
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [format.contentType]
-        panel.nameFieldStringValue = format.displayName
-        panel.canCreateDirectories = true
-        panel.isExtensionHidden = false
-        panel.begin { response in
-            if response == .OK, let dest = panel.url {
-                do {
-                    switch format {
-                    case .plainText:
-                        try meetingNotes.write(to: dest, atomically: true, encoding: .utf8)
-                    case .json:
-                        let payload = ["notes": meetingNotes]
-                        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted])
-                        try data.write(to: dest)
-                    }
-                } catch {
-                    DispatchQueue.main.async { status = "Save failed: \(error.localizedDescription)" }
-                }
-            }
-        }
-        #endif
     }
 }
 
-private extension ContentView {
-    @ViewBuilder
-    private var sectionTabs: some View {
-        TabView(selection: $selectedSection) {
-            workflowTab(.capture, title: "Capture", systemImage: "waveform") { captureSection }
-            workflowTab(.transcript, title: "Transcript", systemImage: "text.quote") { transcriptSection }
-            workflowTab(.insights, title: "Insights", systemImage: "list.bullet.rectangle") { insightsSection }
-        }
-        .tabViewStyle(.automatic)
+private struct ReadinessItem: Identifiable {
+    let title: String
+    let detail: String
+    let systemImage: String
+    let tint: Color
+
+    var id: String { "\(title)-\(detail)-\(systemImage)" }
+}
+
+private struct DiagnosticItem: Identifiable {
+    let label: String
+    let value: String
+
+    var id: String { label }
+}
+
+private struct SessionSidebarView: View {
+    @EnvironmentObject private var appModel: AppModel
+
+    @Binding var sessionPendingDeletion: RecordingSessionSummary?
+
+    let onToggleRecording: () -> Void
+    let onImportAudio: () -> Void
+    let onClearWorkspace: () -> Void
+
+    private var selectedSessionID: Binding<UUID?> {
+        Binding(
+            get: { appModel.activeSession?.id },
+            set: { newValue in
+                guard let newValue else { return }
+                appModel.selectSession(newValue)
+            }
+        )
     }
 
-    @ViewBuilder
-    private func workflowTab<Content: View>(_ section: WorkflowSection, title: String, systemImage: String, @ViewBuilder content: () -> Content) -> some View {
-        AnyView(ScrollView { content() })
-            .tag(section)
-            .tabItem { Label(title, systemImage: systemImage) }
-    }
-
-    private var meetingNotesPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Meeting Notes")
-                    .font(.headline)
-                Spacer()
-                if isGeneratingMeetingNotes {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                }
-                Button("Generate Meeting Notes") {
-                    Task { await generateMeetingNotes() }
-                }
-                .disabled(isGeneratingMeetingNotes || transcriptState.displayText.isEmpty || isTranscribing)
-                .buttonStyle(.borderedProminent)
+    var body: some View {
+        List(selection: selectedSessionID) {
+            Section {
+                SidebarCaptureControls(
+                    isRecording: appModel.isRecording,
+                    isBusy: appModel.isBusy,
+                    hasActiveSession: appModel.activeSession != nil,
+                    hasProtectedActivity: appModel.hasProtectedActivity,
+                    onToggleRecording: onToggleRecording,
+                    onImportAudio: onImportAudio,
+                    onClearWorkspace: onClearWorkspace
+                )
+                .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                .listRowSeparator(.hidden)
+            } header: {
+                Text("Capture")
+            } footer: {
+                Text("Recording and import actions create or update a recoverable session.")
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle(isOn: $useCustomInsightsPrompt.animation()) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Use custom GPT-5 prompt")
-                            .font(.subheadline)
-                        Text("Switch on to provide your own instructions for meeting notes. Keep the {{TRANSCRIPT}} token where the diarized text should be inserted.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            Section {
+                if appModel.recentSessionSummaries.isEmpty {
+                    ContentUnavailableView(
+                        "No Sessions Yet",
+                        systemImage: "square.stack.3d.up.slash",
+                        description: Text("Start a recording or import audio to create your first recoverable session.")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 220)
+                    .listRowSeparator(.hidden)
+                } else {
+                    ForEach(appModel.recentSessionSummaries) { session in
+                        SessionSidebarRow(
+                            session: session,
+                            isLocked: !appModel.canSwitchSessions && appModel.activeSession?.id != session.id
+                        )
+                        .tag(Optional(session.id))
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                sessionPendingDeletion = session
+                            } label: {
+                                Label("Delete Session", systemImage: "trash")
+                            }
+                            .disabled(appModel.hasProtectedActivity)
+                        }
+                        .disabled(!appModel.canSwitchSessions && appModel.activeSession?.id != session.id)
                     }
                 }
-                .toggleStyle(.switch)
+            } header: {
+                Text("Sessions")
+            }
+        }
+        .listStyle(.sidebar)
+    }
+}
 
-                if useCustomInsightsPrompt {
-                    TextEditor(text: $customInsightsPrompt)
-                        .font(.body.monospaced())
-                        .frame(minHeight: 180)
-                        .padding(8)
-                        .background(Color.gray.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.gray.opacity(0.2))
-                        )
-                    HStack {
-                        Text("Need ideas? Start from the default template and tailor it to your workflow.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Reset to template") {
-                            customInsightsPrompt = MeetingNotesService.defaultPrompt
-                        }
-                        .font(.caption)
-                    }
-                } else {
-                    Text("Using TotalRec's default meeting-notes prompt.")
+private struct SidebarCaptureControls: View {
+    let isRecording: Bool
+    let isBusy: Bool
+    let hasActiveSession: Bool
+    let hasProtectedActivity: Bool
+    let onToggleRecording: () -> Void
+    let onImportAudio: () -> Void
+    let onClearWorkspace: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button(isRecording ? "Stop Recording" : "Start Recording", action: onToggleRecording)
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut("r", modifiers: [.command])
+
+            Button("Import Audio…", action: onImportAudio)
+                .buttonStyle(.bordered)
+                .disabled(isBusy)
+
+            if hasActiveSession {
+                Button("Start Fresh", action: onClearWorkspace)
+                    .buttonStyle(.bordered)
+                    .disabled(hasProtectedActivity)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct SessionSidebarRow: View {
+    let session: RecordingSessionSummary
+    let isLocked: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(session.sourceDescription)
+                    .font(.headline)
+                    .lineLimit(2)
+
+                Spacer(minLength: 8)
+
+                Text(session.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(session.statusMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+
+            HStack(spacing: 8) {
+                Label(session.stage.totalRecStatusLabel, systemImage: session.stage.totalRecStatusIcon)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(session.stage.totalRecStatusTint)
+
+                if isLocked {
+                    Label("Locked", systemImage: "lock.fill")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            if let error = meetingNotesError, !error.isEmpty {
-                Text(error)
-                    .foregroundStyle(.red)
-                    .font(.footnote)
-            }
-
-            if meetingNotes.isEmpty {
-                Text("No meeting notes yet. Generate notes to see a structured summary of this meeting.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else {
-                ScrollView {
-                    Text(meetingNotes)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .background(Color.gray.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+            HStack(spacing: 6) {
+                if session.hasAudio {
+                    SessionSidebarMetaPill(title: "Audio", systemImage: "waveform")
                 }
-                .frame(minHeight: 160)
+                if session.hasTranscript {
+                    SessionSidebarMetaPill(title: "Transcript", systemImage: "text.quote")
+                }
+                if session.hasInsightArtifact {
+                    SessionSidebarMetaPill(title: "Insights", systemImage: "list.bullet.rectangle")
+                }
+                if session.lastError?.isEmpty == false {
+                    SessionSidebarMetaPill(title: "Issue", systemImage: "exclamationmark.triangle")
+                }
             }
         }
-        .padding(.top, 12)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct SessionSidebarMetaPill: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption2)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(Color.secondary.opacity(0.12), in: Capsule())
+    }
+}
+
+struct DeferredCommitTextField: View {
+    let title: String
+    @Binding var text: String
+
+    @State private var draftText: String
+    @FocusState private var isFocused: Bool
+
+    init(_ title: String, text: Binding<String>) {
+        self.title = title
+        self._text = text
+        self._draftText = State(initialValue: text.wrappedValue)
+    }
+
+    var body: some View {
+        TextField(title, text: $draftText)
+            .focused($isFocused)
+            .onAppear {
+                draftText = text
+            }
+            .onSubmit {
+                commit()
+            }
+            .onChange(of: isFocused) { _, focused in
+                if !focused {
+                    commit()
+                }
+            }
+            .onChange(of: text) { _, newValue in
+                if !isFocused && draftText != newValue {
+                    draftText = newValue
+                }
+            }
+            .onDisappear {
+                commit()
+            }
+    }
+
+    private func commit() {
+        if text != draftText {
+            text = draftText
+        }
+    }
+}
+
+struct DeferredCommitSecureField: View {
+    let title: String
+    @Binding var text: String
+
+    @State private var draftText: String
+    @FocusState private var isFocused: Bool
+
+    init(_ title: String, text: Binding<String>) {
+        self.title = title
+        self._text = text
+        self._draftText = State(initialValue: text.wrappedValue)
+    }
+
+    var body: some View {
+        SecureField(title, text: $draftText)
+            .focused($isFocused)
+            .onAppear {
+                draftText = text
+            }
+            .onSubmit {
+                commit()
+            }
+            .onChange(of: isFocused) { _, focused in
+                if !focused {
+                    commit()
+                }
+            }
+            .onChange(of: text) { _, newValue in
+                if !isFocused && draftText != newValue {
+                    draftText = newValue
+                }
+            }
+            .onDisappear {
+                commit()
+            }
+    }
+
+    private func commit() {
+        if text != draftText {
+            text = draftText
+        }
     }
 }
 
@@ -1236,158 +3301,76 @@ private struct URLImportSheet: View {
 
     @FocusState private var isFieldFocused: Bool
 
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section(header: Text("Audio URL")) {
-                    TextField("https://example.com/audio.m4a", text: $urlString)
-                        .textFieldStyle(.roundedBorder)
-                        .disableAutocorrection(true)
-                        .focused($isFieldFocused)
-                }
-
-                if isImporting {
-                    HStack(spacing: 12) {
-                        ProgressView()
-                        Text("Downloading…")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .navigationTitle("Import from URL")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { onDismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Import") { onImport(urlString) }
-                        .disabled(urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isImporting)
-                }
-            }
-        }
-        .onAppear { isFieldFocused = true }
+    private var trimmedURLString: String {
+        urlString.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-}
-
-private struct SettingsSheetView: View {
-    @Binding var provider: ContentView.TranscriptionProvider
-    @Binding var nameSuggestionProvider: NameSuggestionProvider
-    @Binding var openAIAPIKey: String
-    @Binding var openAIChunkingStrategy: String
-    @Binding var knownSpeakerNamesInputs: [String]
-    @Binding var knownSpeakerRefsInputs: [String]
-    @Binding var systemGain: Float
-    @Binding var micGain: Float
-    var onClose: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Settings").font(.title2).bold()
-                Spacer()
-                Button("Done") { onClose() }
-                    .keyboardShortcut(.cancelAction)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Transcription Provider").font(.headline)
-                Picker("Transcription Provider", selection: $provider) {
-                    ForEach(ContentView.TranscriptionProvider.allCases) { option in
-                        Text(option.rawValue).tag(option)
-                    }
-                }
-                .pickerStyle(.segmented)
-                if provider == .openAI {
-                    Text((AIConfigManager.shared.openAIKey() ?? "").isEmpty ? "OpenAI API key not set." : "OpenAI API key stored in Keychain.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            // Provider-specific settings
-            Group {
-                if provider == .openAI {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("OpenAI").font(.headline)
-                        HStack {
-                            SecureField("OpenAI API Key", text: $openAIAPIKey)
-                                .textFieldStyle(.roundedBorder)
-                            Button("Clear") { openAIAPIKey = "" }
-                        }
-                        Picker("Chunking", selection: $openAIChunkingStrategy) {
-                            Text("Auto").tag("auto")
-                            Text("None").tag("none")
-                        }
-                        .pickerStyle(.segmented)
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Known Speakers (optional)").font(.headline)
-                            ForEach(0..<4, id: \.self) { idx in
-                                HStack {
-                                    TextField("Name #\(idx + 1)", text: $knownSpeakerNamesInputs[idx])
-                                        .textFieldStyle(.roundedBorder)
-                                    TextField("Reference (data:audio/... or URL)", text: $knownSpeakerRefsInputs[idx])
-                                        .textFieldStyle(.roundedBorder)
-                                }
-                            }
-                            HStack {
-                                Spacer()
-                                Button("Clear Speakers") {
-                                    knownSpeakerNamesInputs = Array(repeating: "", count: 4)
-                                    knownSpeakerRefsInputs = Array(repeating: "", count: 4)
-                                }
-                            }
-                        }
-                        Text("Optional: Provide up to 4 known speakers. Both Name and Sample are required for each.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Text("No provider-specific settings for \(provider.rawValue).")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Name Suggestions").font(.headline)
-                Picker("Name Suggestions Provider", selection: $nameSuggestionProvider) {
-                    ForEach(NameSuggestionProvider.allCases) { option in
-                        Text(option.displayName).tag(option)
-                    }
-                }
-                .pickerStyle(.segmented)
-                Text("Choose how speaker names are suggested for diarized transcripts.")
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Import from URL")
+                    .font(.title2.bold())
+                Text("Paste a direct audio file URL to download it into a new recoverable session.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
-            Divider()
-
-            // Mixdown Gains
             VStack(alignment: .leading, spacing: 8) {
-                Text("Mixdown Gains").font(.headline)
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text("System: \(String(format: "%.2f", systemGain))")
-                        Slider(value: Binding(
-                            get: { Double(systemGain) },
-                            set: { systemGain = Float($0) }
-                        ), in: 0.0...1.5)
-                    }
-                    VStack(alignment: .leading) {
-                        Text("Mic: \(String(format: "%.2f", micGain))")
-                        Slider(value: Binding(
-                            get: { Double(micGain) },
-                            set: { micGain = Float($0) }
-                        ), in: 0.0...1.5)
-                    }
-                }
+                Text("Audio URL")
+                    .font(.subheadline.weight(.semibold))
+
+                TextField(
+                    "",
+                    text: $urlString,
+                    prompt: Text("https://example.com/audio.m4a").foregroundStyle(.secondary)
+                )
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+                .focused($isFieldFocused)
             }
 
-            Spacer()
+            if isImporting {
+                HStack(spacing: 12) {
+                    ProgressView()
+                    Text("Downloading audio…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .totalRecStaticRoundedRect(cornerRadius: 12, tint: TotalRecGlass.captureBlue)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 10) {
+                Spacer()
+
+                Button("Cancel") {
+                    onDismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+                .totalRecGlassButton()
+
+                Button("Import") {
+                    onImport(urlString)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(trimmedURLString.isEmpty || isImporting)
+                .totalRecGlassButton(prominent: true)
+            }
         }
-        .padding()
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            TotalRecAmbientBackground(
+                accent: TotalRecGlass.captureBlue,
+                secondaryAccent: TotalRecGlass.transcriptViolet
+            )
+        )
+        .onAppear {
+            isFieldFocused = true
+        }
     }
 }
 
@@ -1396,26 +3379,141 @@ private struct WindowConfigurator: NSViewRepresentable {
     let configure: (NSWindow) -> Void
 
     func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
+        let view = NSView()
         DispatchQueue.main.async {
-            updateWindow(view)
+            if let window = view.window {
+                configure(window)
+            }
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
-            updateWindow(nsView)
+            if let window = nsView.window {
+                configure(window)
+            }
         }
     }
+}
 
-    private func updateWindow(_ nsView: NSView) {
-        guard let window = nsView.window else { return }
-        configure(window)
+private final class TranscriptSavePanelCoordinator: NSObject, NSOpenSavePanelDelegate {
+    private let panel: NSSavePanel
+    private let formats: [ContentView.TranscriptExportFormat]
+    private let hasSpeakerLabels: Bool
+
+    private(set) var selectedFormat: ContentView.TranscriptExportFormat
+
+    init(
+        panel: NSSavePanel,
+        formats: [ContentView.TranscriptExportFormat],
+        hasSpeakerLabels: Bool
+    ) {
+        precondition(!formats.isEmpty, "Transcript save panel requires at least one export format.")
+
+        self.panel = panel
+        self.formats = formats
+        self.hasSpeakerLabels = hasSpeakerLabels
+        self.selectedFormat = formats[0]
+
+        super.init()
+    }
+
+    @available(macOS 15.0, *)
+    func panel(_ sender: Any, displayNameFor type: UTType) -> String? {
+        format(for: type)?.displayName
+    }
+
+    @available(macOS 15.0, *)
+    func panel(_ sender: Any, didSelect type: UTType?) {
+        guard let format = format(for: type) else { return }
+        selectedFormat = format
+        panel.nameFieldStringValue = suggestedFilename(for: format, preserveCurrentBaseName: true)
+    }
+
+    private func format(for contentType: UTType?) -> ContentView.TranscriptExportFormat? {
+        guard let contentType else { return nil }
+        return formats.first(where: { $0.contentType == contentType })
+    }
+
+    private func suggestedFilename(
+        for format: ContentView.TranscriptExportFormat,
+        preserveCurrentBaseName: Bool
+    ) -> String {
+        guard preserveCurrentBaseName else {
+            return format.suggestedFilename(hasSpeakerLabels: hasSpeakerLabels)
+        }
+
+        let currentName = panel.nameFieldStringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !currentName.isEmpty else {
+            return format.suggestedFilename(hasSpeakerLabels: hasSpeakerLabels)
+        }
+
+        let baseName = URL(fileURLWithPath: currentName).deletingPathExtension().lastPathComponent
+        guard !baseName.isEmpty else {
+            return format.suggestedFilename(hasSpeakerLabels: hasSpeakerLabels)
+        }
+        return "\(baseName).\(format.preferredPathExtension)"
+    }
+}
+
+private final class InsightArtifactSavePanelCoordinator: NSObject, NSOpenSavePanelDelegate {
+    private let panel: NSSavePanel
+    private let formats: [ContentView.InsightArtifactExportFormat]
+    private let artifact: InsightArtifact
+
+    private(set) var selectedFormat: ContentView.InsightArtifactExportFormat
+
+    init(
+        panel: NSSavePanel,
+        formats: [ContentView.InsightArtifactExportFormat],
+        artifact: InsightArtifact
+    ) {
+        precondition(!formats.isEmpty, "Insight artifact save panel requires at least one export format.")
+
+        self.panel = panel
+        self.formats = formats
+        self.artifact = artifact
+        self.selectedFormat = formats[0]
+
+        super.init()
+    }
+
+    @available(macOS 15.0, *)
+    func panel(_ sender: Any, displayNameFor type: UTType) -> String? {
+        format(for: type)?.displayName
+    }
+
+    @available(macOS 15.0, *)
+    func panel(_ sender: Any, didSelect type: UTType?) {
+        guard let format = format(for: type) else { return }
+        selectedFormat = format
+        panel.nameFieldStringValue = suggestedFilename(for: format, preserveCurrentBaseName: true)
+    }
+
+    private func format(for contentType: UTType?) -> ContentView.InsightArtifactExportFormat? {
+        guard let contentType else { return nil }
+        return formats.first(where: { $0.contentType == contentType })
+    }
+
+    private func suggestedFilename(
+        for format: ContentView.InsightArtifactExportFormat,
+        preserveCurrentBaseName: Bool
+    ) -> String {
+        guard preserveCurrentBaseName else {
+            return format.suggestedFilename(for: artifact)
+        }
+
+        let currentName = panel.nameFieldStringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !currentName.isEmpty else {
+            return format.suggestedFilename(for: artifact)
+        }
+
+        let baseName = URL(fileURLWithPath: currentName).deletingPathExtension().lastPathComponent
+        guard !baseName.isEmpty else {
+            return format.suggestedFilename(for: artifact)
+        }
+        return "\(baseName).\(format.preferredPathExtension)"
     }
 }
 #endif
-
-#Preview {
-    ContentView()
-}
