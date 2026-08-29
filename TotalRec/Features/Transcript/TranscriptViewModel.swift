@@ -187,10 +187,10 @@ final class TranscriptViewModel: ObservableObject {
                 var mapped: [SuggestedAlias] = []
                 if !dict.isEmpty {
                     print("[NameSuggestions][TranscriptViewModel] Provider returned dict: \(dict)")
-                    let normalized = normalizeSuggestionDictionary(dict)
+                    let normalized = self.normalizeSuggestionDictionary(dict)
                     print("[NameSuggestions][TranscriptViewModel] Normalized suggestion keys: \(normalized.keys.sorted())")
                     mapped = labels.enumerated().map { index, label in
-                        let value = candidateValue(for: label, index: index, normalized: normalized)
+                        let value = self.candidateValue(for: label, index: index, normalized: normalized)
                         let trimmedValue = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                         let fallback = self.speakers.first(where: { $0.label == label })?.alias ?? label
                         let final = trimmedValue.isEmpty ? fallback : trimmedValue

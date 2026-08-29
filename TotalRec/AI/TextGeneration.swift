@@ -23,6 +23,6 @@ protocol TextGeneratingTransport {
     var kind: TextGenerationTransportKind { get }
     func generateText(
         _ request: TextGenerationRequest,
-        onEvent: @escaping (TextGenerationEvent) -> Void
+        onEvent: @MainActor @escaping (TextGenerationEvent) -> Void
     ) async throws -> String
 }

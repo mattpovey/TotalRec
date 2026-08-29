@@ -249,7 +249,7 @@ private struct MockInsightGenerator: InsightGenerating {
     func generateArtifact(
         from transcript: TranscriptState,
         settings: InsightSettings,
-        onEvent: @escaping (TextGenerationEvent) -> Void
+        onEvent: @MainActor @escaping (TextGenerationEvent) -> Void
     ) async throws -> InsightArtifact {
         for event in events {
             onEvent(event)
@@ -262,7 +262,7 @@ private struct SlowCancellableInsightGenerator: InsightGenerating {
     func generateArtifact(
         from transcript: TranscriptState,
         settings: InsightSettings,
-        onEvent: @escaping (TextGenerationEvent) -> Void
+        onEvent: @MainActor @escaping (TextGenerationEvent) -> Void
     ) async throws -> InsightArtifact {
         onEvent(.started)
         onEvent(.textDelta("Partial output"))

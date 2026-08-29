@@ -191,7 +191,7 @@ struct ConversationTransport: TextGeneratingTransport {
 
     func generateText(
         _ request: TextGenerationRequest,
-        onEvent: @escaping (TextGenerationEvent) -> Void
+        onEvent: @MainActor @escaping (TextGenerationEvent) -> Void
     ) async throws -> String {
         try Task.checkCancellation()
         onEvent(.started)
@@ -277,7 +277,7 @@ struct ConversationTransport: TextGeneratingTransport {
     private func generateText(
         _ request: TextGenerationRequest,
         preferStreaming: Bool,
-        onEvent: @escaping (TextGenerationEvent) -> Void
+        onEvent: @MainActor @escaping (TextGenerationEvent) -> Void
     ) async throws -> String {
         let urlRequest = try makeURLRequest(for: request, preferStreaming: preferStreaming)
 
@@ -354,7 +354,7 @@ struct ConversationTransport: TextGeneratingTransport {
 
     private func generateStreamingText(
         with request: URLRequest,
-        onEvent: @escaping (TextGenerationEvent) -> Void
+        onEvent: @MainActor @escaping (TextGenerationEvent) -> Void
     ) async throws -> String {
         var parser = StreamParser()
         var collectedText = ""
@@ -424,7 +424,7 @@ struct ConversationTransport: TextGeneratingTransport {
         collectedText: inout String,
         didComplete: inout Bool,
         didEmitFailure: inout Bool,
-        onEvent: @escaping (TextGenerationEvent) -> Void
+        onEvent: @MainActor @escaping (TextGenerationEvent) -> Void
     ) throws {
         for event in events {
             switch event {

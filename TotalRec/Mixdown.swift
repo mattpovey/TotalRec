@@ -1,6 +1,10 @@
 import Foundation
 @preconcurrency import AVFoundation
 
+nonisolated private struct UncheckedSendable<Value>: @unchecked Sendable {
+    let value: Value
+}
+
 struct Mixdown {
     /// Mix system + mic into a single .m4a.
     /// - Parameters:
@@ -58,12 +62,13 @@ struct Mixdown {
                     try await exporter.export(to: outputM4A, as: .m4a)
                     completion(.success(outputM4A))
                 } else {
-                    exporter.exportAsynchronously {
-                        switch exporter.status {
+                    let sendableExporter = UncheckedSendable(value: exporter)
+                    sendableExporter.value.exportAsynchronously {
+                        switch sendableExporter.value.status {
                         case .completed:
                             completion(.success(outputM4A))
                         case .failed, .cancelled:
-                            completion(.failure(exporter.error ?? NSError(domain: "Mixdown", code: -51)))
+                            completion(.failure(sendableExporter.value.error ?? NSError(domain: "Mixdown", code: -51)))
                         default:
                             completion(.failure(NSError(domain: "Mixdown", code: -52)))
                         }
@@ -83,7 +88,7 @@ struct AudioChunker {
         let isTemporary: Bool
     }
 
-    static let defaultMaxDuration: TimeInterval = 600 // seconds (10 minutes)
+    nonisolated static let defaultMaxDuration: TimeInterval = 600 // seconds (10 minutes)
 
     static func chunkIfNeeded(sourceURL: URL,
                               strategy: String,
@@ -136,17 +141,22 @@ struct AudioChunker {
         )
         exporter.shouldOptimizeForNetworkUse = true
 
-        try await withCheckedThrowingContinuation { continuation in
-            exporter.exportAsynchronously {
-                switch exporter.status {
-                case .completed:
-                    continuation.resume(returning: ())
-                case .failed, .cancelled:
-                    let error = exporter.error ?? NSError(domain: "AudioChunker", code: -2, userInfo: [NSLocalizedDescriptionKey: "Chunk export failed"])
-                    continuation.resume(throwing: error)
-                default:
-                    let error = exporter.error ?? NSError(domain: "AudioChunker", code: -3, userInfo: [NSLocalizedDescriptionKey: "Chunk export ended unexpectedly"])
-                    continuation.resume(throwing: error)
+        if #available(macOS 15.0, *) {
+            try await exporter.export(to: destination, as: .m4a)
+        } else {
+            let sendableExporter = UncheckedSendable(value: exporter)
+            try await withCheckedThrowingContinuation { continuation in
+                sendableExporter.value.exportAsynchronously {
+                    switch sendableExporter.value.status {
+                    case .completed:
+                        continuation.resume(returning: ())
+                    case .failed, .cancelled:
+                        let error = sendableExporter.value.error ?? NSError(domain: "AudioChunker", code: -2, userInfo: [NSLocalizedDescriptionKey: "Chunk export failed"])
+                        continuation.resume(throwing: error)
+                    default:
+                        let error = sendableExporter.value.error ?? NSError(domain: "AudioChunker", code: -3, userInfo: [NSLocalizedDescriptionKey: "Chunk export ended unexpectedly"])
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
         }

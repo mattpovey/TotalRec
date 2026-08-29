@@ -1,6 +1,6 @@
 # TotalRec
 
-TotalRec is a macOS app for recording system audio + microphone, transcribing the result with Apple or OpenAI, and generating structured meeting notes or running an arbitrary LLM prompt against the transcript. It streamlines the workflow from capture → transcript → insights, with tools for speaker labeling and export.
+TotalRec is a macOS app for recording system audio and microphone input, transcribing the result locally or through a configured service, and generating reusable transcript-derived artifacts. It streamlines capture → transcript → insights while keeping sessions recoverable between launches.
 
 ## Features
 - Record mixed audio (system + microphone) to a single M4A file
@@ -8,10 +8,13 @@ TotalRec is a macOS app for recording system audio + microphone, transcribing th
 - Transcribe with:
   - Apple Speech (on-device or cloud)
   - OpenAI diarized transcription (with optional Known Speakers)
-- Review and edit transcripts with speaker tools
-- Request speaker name suggestions from a LLM
-- Generate structured meeting notes (or use an optional custom prompt)
-- Export audio, transcripts (.txt, .json, .vtt, .srt), and notes (.txt, .json)
+  - TScript servers with model discovery, timestamps, translation, and optional diarization
+- Review transcript segments, correct wording, find and replace text, and play timed clips
+- Reassign, merge, and label speakers; request name suggestions from OpenAI or SambaNova
+- Generate meeting notes, action lists, decision logs, customer-call summaries, podcast summaries, or custom artifacts
+- Export audio, transcripts (`.txt`, `.json`, `.vtt`, `.srt`), and insights (`.txt`, `.json`)
+- Resume, inspect, switch, and delete persisted recording sessions
+- Start and stop recording from the menu bar
 
 ## App Workflow
 The app is organized in three tabs:
@@ -22,27 +25,44 @@ The app is organized in three tabs:
    - Save mixed audio
    - Quick preview of the latest transcript (if available)
 2. Transcript
-   - Run transcription (Apple on-device/cloud or OpenAI diarized)
-   - Manage speaker labels and consolidate consecutive speaker turns
-   - Request speaker name suggestions
-   - Export transcript as Plain Text, JSON, WebVTT (.vtt), or SubRip (.srt)
+   - Run transcription with Apple, OpenAI, or TScript
+   - Correct transcript text and apply literal replacements
+   - Play individual timed segments or surrounding context
+   - Manage speaker aliases and assignments, merge speakers, and consolidate consecutive turns
+   - Preview/copy the final document and export Plain Text, JSON, WebVTT, or SubRip
 3. Insights
-   - Generate structured meeting notes from the transcript
-   - Optionally use a custom prompt (keep `{{TRANSCRIPT}}` where the diarized text should be inserted)
-   - Export notes as Plain Text or JSON
+   - Choose a built-in workflow or supply a custom prompt
+   - Stream generation through OpenAI Responses or SambaNova-compatible chat completions
+   - Stop an in-progress generation without replacing the last saved artifact
+   - Export or copy the generated artifact
 
 ## Requirements
-- Xcode 15+ (tested with Xcode 26.1 toolchain)
-- macOS 13+
-- Swift Concurrency enabled (Swift 5.9+)
-- For OpenAI features: an OpenAI API key
+
+- Xcode 26.1+ (tested with Xcode 26.6)
+- macOS 14+
+- An OpenAI API key for OpenAI transcription, OpenAI insights, or OpenAI name suggestions
+- A SambaNova API key for SambaNova insights or name suggestions
+- A reachable TScript server for TScript transcription
 
 ## Build & Run
 1. Open the project in Xcode.
-2. Select the macOS target and run.
+2. Select the shared `TotalRec` scheme and run.
 3. On first record, macOS will request Screen Recording permission. Grant it in:
    - System Settings → Privacy & Security → Screen Recording → enable for this app
-4. (Optional) Configure OpenAI API key in Settings within the app.
+4. Configure the providers you want to use in Settings.
+
+Run the complete unit-test suite from the command line with:
+
+```sh
+xcodebuild test \
+  -project TotalRec.xcodeproj \
+  -scheme TotalRec \
+  -configuration Debug \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+GitHub Actions runs the same build and test flow on the `macos-26` runner.
 
 ## Configuration
 ### Transcription Provider
@@ -50,11 +70,19 @@ Choose between:
 - Apple (On-Device)
 - Apple (Cloud)
 - OpenAI (Diarized)
+- TScript
 
-The current provider is shown in the header with a status badge. For OpenAI, the badge indicates whether an API key is configured.
+The current provider is shown with a readiness summary. OpenAI requires a Keychain-backed API key. TScript requires a server URL and discovers the available models and capabilities from that server.
+
+### Insight and Name-Suggestion Providers
+
+- OpenAI uses the Responses API for insight generation.
+- SambaNova uses an OpenAI-compatible chat-completions transport.
+- Provider model lists can be refreshed in Settings and are cached locally.
+- API keys are stored in Keychain; non-secret provider settings are stored in Application Support.
 
 ### OpenAI Key & Upload Chunking
-- Enter your OpenAI API key in the app’s Settings sheet. It’s stored in Keychain.
+- Enter your OpenAI API key in the app’s Settings window. It’s stored in Keychain.
 - Upload chunking for long audio:
   - `Auto` (default): Splits long audio into multiple uploads
   - `Single Upload`: Uploads the entire file at once and may fail for very large recordings
@@ -69,7 +97,11 @@ If any row is partially filled, transcription with OpenAI will be disabled until
 This is useful if transcribing known speakers repeatedly but in general the Suggest Names functionality works well enough for this purpose if names are mentioned in the transcript (i.e. when people introduce themselves)
 
 ### Name Suggestions Provider
-Controls where speaker name suggestions come from (can be disabled).
+Controls where speaker name suggestions come from and can be disabled. Name suggestions are enabled in the standard Debug and Release builds.
+
+### TScript
+
+Configure the server URL in Settings, then refresh its model registry. Per-model options include language, translation, timestamps, diarization, speaker-count hints, and supported advanced decoding controls. HTTPS is required by default; insecure HTTP and invalid-certificate overrides are explicit opt-ins for trusted development servers.
 
 ### Mixdown Gains
 Adjust system and mic gain before mixing down the recorded MOV into M4A.
@@ -85,14 +117,18 @@ Adjust system and mic gain before mixing down the recorded MOV into M4A.
 - Transcribe Audio: runs the selected provider
   - Apple: streams partial text to the UI
   - OpenAI: optionally splits long recordings into multiple uploads and supports known speakers
+  - TScript: uploads to the selected server model and consumes structured timed/diarized output when available
 - Request Suggestions: asks the configured provider for speaker name ideas
 - Consolidate Consecutive Speakers: merges back-to-back turns by the same speaker
+- Transcript editor: correct individual segments or raw text and apply literal replacements
+- Playback: play timed clips and configurable surrounding context
 - Export: save as .txt, .json, .vtt, or .srt
 
 ### Insights
-- Generate Meeting Notes: produces a structured summary from the transcript
-- Custom Prompt (optional): supply your own instructions; keep `{{TRANSCRIPT}}` where the diarized text should appear
-- Export notes as .txt or .json
+
+- Select meeting notes, action items, decisions, customer call, podcast summary, or a custom workflow
+- Custom Prompt: keep `{{TRANSCRIPT}}` where the formatted transcript should appear; if omitted, TotalRec appends the transcript
+- Stream, stop, copy, and export insight artifacts as `.txt` or `.json`
 
 ## Permissions
 - Screen Recording: required for capturing system audio
@@ -101,27 +137,32 @@ Adjust system and mic gain before mixing down the recorded MOV into M4A.
 If recording fails to start, check System Settings → Privacy & Security → Screen Recording and Microphone.
 
 ## Architecture Overview
-- SwiftUI view hierarchy anchored by `ContentView`
-  - Tabs: Capture, Transcript, Insights
-  - Settings presented as a sheet
-- Recording via `SystemAudioRecorder` → temporary MOV → `Mixdown.toM4A` with adjustable gains
+
+- `TotalRecApp` owns the main window, Settings scene, and menu-bar extra.
+- `AppModel` is the main-actor workflow coordinator and exposes the active/recent session state.
+- `SessionStore` persists session manifests, summaries, audio, transcripts, and insight artifacts under Application Support.
+- Recording runs through `SystemAudioRecorder` → temporary MOV → `Mixdown.toM4A` with adjustable gains.
 - Transcription
   - Apple: `FileTranscriber.transcribeFile(onDevicePreferred:)` with streaming partials
   - OpenAI: `OpenAITranscriber.transcribeDiarized` with optional chunking and known speakers
-- Transcript state modeled by `TranscriptState`, rendered by `TranscriptView`
-- Export via `TranscriptRenderer` for caption formats (WebVTT/SRT)
-- Insights via `MeetingNotesService` (optional custom prompt)
-- Config persisted with `AIConfigManager` (OpenAI key, provider choices)
+  - TScript: `TScriptTranscriber` with server model discovery and capability-aware requests
+- `TranscriptState` is the canonical editable transcript model; transcript feature views handle editing, speakers, document output, and playback.
+- `InsightGenerationService` renders workflow prompts and selects the OpenAI Responses or conversation transport.
+- `AIConfigManager` persists provider settings and Keychain credentials; `DiagnosticsLogger` writes insight diagnostics under Application Support.
+- The UI uses native glass effects on macOS 26 and static surface fallbacks on macOS 14–15.
 
 ## Troubleshooting
 - “Screen capture permission required”: Grant Screen Recording permission and retry.
 - OpenAI transcription disabled: Ensure API key is set and no partially filled Known Speakers rows remain.
 - Long audio: Try `Auto` chunking with OpenAI.
+- TScript models unavailable: Verify the server URL, refresh models, and confirm the selected model is runtime-available.
+- Insight generation disabled: Verify the selected provider has an API key and a compatible model.
 
 ## Roadmap
-- Additional analytics in Insights
-- More providers for transcription and name suggestions
-- Cross-platform considerations where feasible
+
+- Additional analytics and structured insight outputs
+- More transcription and LLM providers
+- Broader integration and UI automation coverage
 
 ## License
 MIT License

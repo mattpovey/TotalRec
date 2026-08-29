@@ -4,7 +4,7 @@ protocol InsightGenerating {
     func generateArtifact(
         from transcript: TranscriptState,
         settings: InsightSettings,
-        onEvent: @escaping (TextGenerationEvent) -> Void
+        onEvent: @MainActor @escaping (TextGenerationEvent) -> Void
     ) async throws -> InsightArtifact
 }
 
@@ -37,7 +37,7 @@ struct InsightGenerationService: InsightGenerating {
     func generateArtifact(
         from transcript: TranscriptState,
         settings: InsightSettings,
-        onEvent: @escaping (TextGenerationEvent) -> Void
+        onEvent: @MainActor @escaping (TextGenerationEvent) -> Void
     ) async throws -> InsightArtifact {
         let transcriptBody = transcriptText(from: transcript)
         guard !transcriptBody.isEmpty else {

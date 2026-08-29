@@ -545,9 +545,7 @@ final class AppModel: ObservableObject {
                 from: transcriptState,
                 settings: insightSettings
             ) { [weak self] event in
-                Task { @MainActor in
-                    self?.applyInsightGenerationEvent(event)
-                }
+                self?.applyInsightGenerationEvent(event)
             }
             try Task.checkCancellation()
 

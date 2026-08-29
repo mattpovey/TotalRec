@@ -26,6 +26,7 @@ enum TotalRecGlass {
     static let successGreen = Color(red: 0.23, green: 0.56, blue: 0.39)
     static let neutralTint = Color(red: 0.45, green: 0.47, blue: 0.53)
 
+    @available(macOS 26.0, *)
     static func glass(
         tint: Color? = nil,
         usage: TintUsage = .panel,
@@ -159,8 +160,13 @@ struct TotalRecGlassCluster<Content: View>: View {
         self.content = content
     }
 
+    @ViewBuilder
     var body: some View {
-        GlassEffectContainer(spacing: spacing) {
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) {
+                content()
+            }
+        } else {
             content()
         }
     }
@@ -456,46 +462,78 @@ struct TotalRecActivitySymbol: View {
 }
 
 extension View {
+    @ViewBuilder
     func totalRecGlassPanel(
         cornerRadius: CGFloat = TotalRecGlass.panelCornerRadius,
         tint: Color? = nil,
         interactive: Bool = false
     ) -> some View {
-        glassEffect(
-            TotalRecGlass.glass(tint: tint, usage: .panel, interactive: interactive),
-            in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        )
+        if #available(macOS 26.0, *) {
+            glassEffect(
+                TotalRecGlass.glass(tint: tint, usage: .panel, interactive: interactive),
+                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            )
+        } else {
+            totalRecStaticPanel(cornerRadius: cornerRadius, tint: tint)
+        }
     }
 
+    @ViewBuilder
     func totalRecGlassPill(
         tint: Color? = nil,
         interactive: Bool = false
     ) -> some View {
-        glassEffect(
-            TotalRecGlass.glass(tint: tint, usage: .pill, interactive: interactive),
-            in: Capsule()
-        )
+        if #available(macOS 26.0, *) {
+            glassEffect(
+                TotalRecGlass.glass(tint: tint, usage: .pill, interactive: interactive),
+                in: Capsule()
+            )
+        } else {
+            totalRecStaticPill(tint: tint)
+        }
     }
 
+    @ViewBuilder
     func totalRecGlassRoundedRect(
         cornerRadius: CGFloat = TotalRecGlass.insetCornerRadius,
         tint: Color? = nil,
         interactive: Bool = false
     ) -> some View {
-        glassEffect(
-            TotalRecGlass.glass(tint: tint, usage: .secondarySurface, interactive: interactive),
-            in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        )
+        if #available(macOS 26.0, *) {
+            glassEffect(
+                TotalRecGlass.glass(tint: tint, usage: .secondarySurface, interactive: interactive),
+                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            )
+        } else {
+            totalRecStaticRoundedRect(cornerRadius: cornerRadius, tint: tint)
+        }
     }
 
     @ViewBuilder
     func totalRecGlassButton(prominent: Bool = false, tint: Color? = nil) -> some View {
-        if prominent {
-            buttonStyle(.glassProminent)
-        } else if let tint {
-            buttonStyle(.glass(TotalRecGlass.glass(tint: tint, usage: .button)))
+        if #available(macOS 26.0, *) {
+            if prominent {
+                buttonStyle(.glassProminent)
+            } else if let tint {
+                buttonStyle(.glass(TotalRecGlass.glass(tint: tint, usage: .button)))
+            } else {
+                buttonStyle(.glass)
+            }
+        } else if prominent {
+            buttonStyle(.borderedProminent)
+                .tint(tint)
         } else {
-            buttonStyle(.glass)
+            buttonStyle(.bordered)
+                .tint(tint)
+        }
+    }
+
+    @ViewBuilder
+    func totalRecGlassTransition() -> some View {
+        if #available(macOS 26.0, *) {
+            glassEffectTransition(.materialize)
+        } else {
+            self
         }
     }
 

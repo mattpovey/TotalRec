@@ -871,7 +871,7 @@ private struct TranscriptSuggestionOverlay: View {
             }
             .padding(24)
             .totalRecGlassPanel(cornerRadius: 16, tint: TotalRecGlass.transcriptViolet)
-            .glassEffectTransition(.materialize)
+            .totalRecGlassTransition()
         }
     }
 }

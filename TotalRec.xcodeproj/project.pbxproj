@@ -11,6 +11,9 @@
 		220000000000000000000001 /* TranscriptStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000012 /* TranscriptStateTests.swift */; };
 		220000000000000000000002 /* TranscriptPlaybackControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000013 /* TranscriptPlaybackControllerTests.swift */; };
 		220000000000000000000003 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 220000000000000000000014 /* XCTest.framework */; };
+		220000000000000000000004 /* AppModelInsightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000015 /* AppModelInsightTests.swift */; };
+		220000000000000000000005 /* InsightPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000016 /* InsightPersistenceTests.swift */; };
+		220000000000000000000006 /* ResponsesTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000017 /* ResponsesTransportTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -30,6 +33,9 @@
 		220000000000000000000012 /* TranscriptStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptStateTests.swift; sourceTree = "<group>"; };
 		220000000000000000000013 /* TranscriptPlaybackControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptPlaybackControllerTests.swift; sourceTree = "<group>"; };
 		220000000000000000000014 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
+		220000000000000000000015 /* AppModelInsightTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelInsightTests.swift; sourceTree = "<group>"; };
+		220000000000000000000016 /* InsightPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightPersistenceTests.swift; sourceTree = "<group>"; };
+		220000000000000000000017 /* ResponsesTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResponsesTransportTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -95,6 +101,9 @@
 		220000000000000000000021 /* TotalRecTests */ = {
 			isa = PBXGroup;
 			children = (
+				220000000000000000000015 /* AppModelInsightTests.swift */,
+				220000000000000000000016 /* InsightPersistenceTests.swift */,
+				220000000000000000000017 /* ResponsesTransportTests.swift */,
 				220000000000000000000012 /* TranscriptStateTests.swift */,
 				220000000000000000000013 /* TranscriptPlaybackControllerTests.swift */,
 			);
@@ -215,6 +224,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				220000000000000000000004 /* AppModelInsightTests.swift in Sources */,
+				220000000000000000000005 /* InsightPersistenceTests.swift in Sources */,
+				220000000000000000000006 /* ResponsesTransportTests.swift in Sources */,
 				220000000000000000000002 /* TranscriptPlaybackControllerTests.swift in Sources */,
 				220000000000000000000001 /* TranscriptStateTests.swift in Sources */,
 			);
@@ -285,7 +297,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -343,7 +355,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
@@ -390,6 +402,7 @@
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) ENABLE_NAME_SUGGESTIONS";
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
@@ -436,6 +449,7 @@
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) ENABLE_NAME_SUGGESTIONS";
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
@@ -457,7 +471,7 @@
 					"@executable_path/../Frameworks",
 					"@loader_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = sosayweall.TotalRecTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
@@ -483,7 +497,7 @@
 					"@executable_path/../Frameworks",
 					"@loader_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = sosayweall.TotalRecTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;

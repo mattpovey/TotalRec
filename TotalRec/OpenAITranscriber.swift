@@ -25,8 +25,8 @@ struct OpenAITranscriber {
         }
     }
 
-    struct Response: Decodable {
-        struct Segment: Decodable {
+    nonisolated struct Response: Decodable {
+        nonisolated struct Segment: Decodable {
             let speaker: String?
             let text: String
             let id: String?
@@ -51,7 +51,7 @@ struct OpenAITranscriber {
                 self.end = try? c.decode(Double.self, forKey: .end)
             }
         }
-        struct Diarization: Decodable { let segments: [Segment]? }
+        nonisolated struct Diarization: Decodable { let segments: [Segment]? }
         let text: String?
         let segments: [Segment]?
         let diarization: Diarization?

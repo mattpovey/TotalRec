@@ -199,7 +199,7 @@ struct ResponsesTransport: TextGeneratingTransport {
 
     func generateText(
         _ request: TextGenerationRequest,
-        onEvent: @escaping (TextGenerationEvent) -> Void
+        onEvent: @MainActor @escaping (TextGenerationEvent) -> Void
     ) async throws -> String {
         try Task.checkCancellation()
 
@@ -321,7 +321,7 @@ struct ResponsesTransport: TextGeneratingTransport {
         collectedText: inout String,
         completedText: inout String?,
         didEmitFailure: inout Bool,
-        onEvent: @escaping (TextGenerationEvent) -> Void
+        onEvent: @MainActor @escaping (TextGenerationEvent) -> Void
     ) throws {
         for event in events {
             switch event {
