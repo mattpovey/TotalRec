@@ -919,6 +919,9 @@ struct ContentView: View {
         let speakerCount = appModel.transcriptState.orderedSpeakerLabels.count
         let segmentCount = appModel.transcriptState.segments.count
         if segmentCount > 0 {
+            if speakerCount == 0 {
+                return "\(segmentCount) clip\(segmentCount == 1 ? "" : "s"), no speaker labels"
+            }
             return "\(speakerCount) speaker\(speakerCount == 1 ? "" : "s"), \(segmentCount) segment\(segmentCount == 1 ? "" : "s")"
         }
         let lineCount = appModel.transcriptState.rawText.split(whereSeparator: \.isNewline).count
@@ -1932,9 +1935,8 @@ struct ContentView: View {
             description: transcriptStepDescription(for: selectedTranscriptStep),
             systemImage: "text.quote",
             tint: workflowSectionTint(.transcript),
-            detail: hasTranscriptDisplayText
-                ? "\(appModel.transcriptState.orderedSpeakerLabels.count) speakers"
-                : (appModel.audioURL == nil ? nil : "Audio ready\(formattedDurationSuffix)")
+            detail: appModel.transcriptState.workspaceSummary
+                ?? (appModel.audioURL == nil ? nil : "Audio ready\(formattedDurationSuffix)")
         )
     }
 

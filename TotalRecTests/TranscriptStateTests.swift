@@ -2,6 +2,35 @@ import XCTest
 @testable import TotalRec
 
 final class TranscriptStateTests: XCTestCase {
+    func testWorkspaceSummaryUsesClipCountForTimedTranscriptWithoutSpeakerLabels() {
+        let transcript = TranscriptState(
+            segments: [
+                TranscriptSegment(speakerLabel: nil, text: "First", start: 0, end: 2),
+                TranscriptSegment(speakerLabel: nil, text: "Second", start: 2, end: 4),
+                TranscriptSegment(speakerLabel: nil, text: "Third", start: 4, end: 6)
+            ]
+        )
+
+        XCTAssertEqual(transcript.workspaceSummary, "3 clips")
+    }
+
+    func testWorkspaceSummaryPrefersDiarizedSpeakerCount() {
+        let transcript = TranscriptState(
+            segments: [
+                TranscriptSegment(speakerLabel: "SPEAKER_00", text: "First", start: 0, end: 2),
+                TranscriptSegment(speakerLabel: "SPEAKER_01", text: "Second", start: 2, end: 4),
+                TranscriptSegment(speakerLabel: "SPEAKER_00", text: "Third", start: 4, end: 6)
+            ]
+        )
+
+        XCTAssertEqual(transcript.workspaceSummary, "2 speakers")
+    }
+
+    func testWorkspaceSummaryDescribesRawTranscriptWithoutInventingSpeakers() {
+        XCTAssertEqual(TranscriptState(rawText: "Raw transcript").workspaceSummary, "Transcript ready")
+        XCTAssertNil(TranscriptState().workspaceSummary)
+    }
+
     func testUpdateTextUpdatesOnlyTargetSegment() {
         let first = TranscriptSegment(speakerLabel: "A", text: "Hello", start: 0, end: 1)
         let second = TranscriptSegment(speakerLabel: "B", text: "World", start: 1, end: 2)

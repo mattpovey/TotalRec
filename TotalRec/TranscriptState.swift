@@ -335,6 +335,22 @@ struct TranscriptState: Codable, Equatable, Sendable {
         return !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    var workspaceSummary: String? {
+        guard hasDisplayText else { return nil }
+
+        let speakerCount = orderedSpeakerLabels.count
+        if speakerCount > 0 {
+            return "\(speakerCount) speaker\(speakerCount == 1 ? "" : "s")"
+        }
+
+        if hasTimedSegments {
+            let clipCount = segments.count
+            return "\(clipCount) clip\(clipCount == 1 ? "" : "s")"
+        }
+
+        return "Transcript ready"
+    }
+
     var displayText: String {
         if !segments.isEmpty {
             return segments.map { segment in
