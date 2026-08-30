@@ -5,6 +5,43 @@ extension Notification.Name {
     static let totalRecAIConfigurationDidChange = Notification.Name("TotalRecAIConfigurationDidChange")
 }
 
+/// Keeps Keychain lookups bounded to one per account for the lifetime of the app.
+///
+/// SwiftUI can recreate views and deliver configuration notifications frequently. Without
+/// this cache, each refresh performs another `SecItemCopyMatching` call and macOS may present
+/// the same Keychain authorization dialog repeatedly, especially for development builds whose
+/// signing identity has changed between launches.
+struct APIKeyMemoryCache {
+    private enum Entry {
+        case loaded(String?)
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    mutating func value(for account: String, loading loader: () -> String?) -> String? {
+        if case let .loaded(value) = entries[account] {
+            return value
+        }
+
+        let value = loader()
+        entries[account] = .loaded(value)
+        return value
+    }
+
+    func isLoaded(_ account: String) -> Bool {
+        entries[account] != nil
+    }
+
+    func cachedValue(for account: String) -> String? {
+        guard case let .loaded(value) = entries[account] else { return nil }
+        return value
+    }
+
+    mutating func store(_ value: String?, for account: String) {
+        entries[account] = .loaded(value)
+    }
+}
+
 struct AIConfiguration: Codable {
     var defaultProvider: String
     var nameSuggestionProvider: String
@@ -141,6 +178,7 @@ final class AIConfigManager {
     private let keychainService = "com.totalrec.ai"
     private let openAIKeychainAccount = "openai_api_key"
     private let sambaNovaKeychainAccount = "sambanova_api_key"
+    private var apiKeyCache = APIKeyMemoryCache()
 
     private(set) var configuration: AIConfiguration
 
@@ -186,11 +224,11 @@ final class AIConfigManager {
     }
 
     func setOpenAIKey(_ key: String?) throws {
-        try setAPIKey(key, for: .openAI)
+        _ = try setAPIKey(key, for: .openAI)
     }
 
     func deleteOpenAIKey() throws {
-        try deleteAPIKey(for: .openAI)
+        _ = try deleteAPIKey(for: .openAI)
     }
 
     func updateOpenAIKey(_ key: String?) throws {
@@ -206,10 +244,18 @@ final class AIConfigManager {
     }
 
     func apiKey(for provider: LLMProvider) -> String? {
+        let service = keychainService
+        let account = keychainAccount(for: provider)
+        return apiKeyCache.value(for: account) {
+            Self.readAPIKey(service: service, account: account)
+        }
+    }
+
+    private static func readAPIKey(service: String, account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount(for: provider),
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
@@ -220,8 +266,9 @@ final class AIConfigManager {
     }
 
     func updateAPIKey(_ key: String?, for provider: LLMProvider) throws {
-        try setAPIKey(key, for: provider)
-        try save()
+        if try setAPIKey(key, for: provider) {
+            try save()
+        }
     }
 
     func setDefaultProvider(_ provider: String) throws {
@@ -394,21 +441,30 @@ final class AIConfigManager {
         }
     }
 
-    private func setAPIKey(_ key: String?, for provider: LLMProvider) throws {
-        guard let key, !key.isEmpty else {
-            try deleteAPIKey(for: provider)
-            return
+    @discardableResult
+    private func setAPIKey(_ key: String?, for provider: LLMProvider) throws -> Bool {
+        let account = keychainAccount(for: provider)
+        let normalizedKey = key.flatMap { $0.isEmpty ? nil : $0 }
+        if apiKeyCache.isLoaded(account), apiKeyCache.cachedValue(for: account) == normalizedKey {
+            return false
+        }
+
+        guard let key = normalizedKey else {
+            return try deleteAPIKey(for: provider)
         }
 
         let data = Data(key.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount(for: provider)
+            kSecAttrAccount as String: account
         ]
         let attributes: [String: Any] = [kSecValueData as String: data]
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecSuccess { return }
+        if status == errSecSuccess {
+            apiKeyCache.store(key, for: account)
+            return true
+        }
         if status == errSecItemNotFound {
             var addQuery = query
             addQuery[kSecValueData as String] = data
@@ -416,21 +472,30 @@ final class AIConfigManager {
             guard addStatus == errSecSuccess else {
                 throw NSError(domain: NSOSStatusErrorDomain, code: Int(addStatus))
             }
-            return
+            apiKeyCache.store(key, for: account)
+            return true
         }
         throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
     }
 
-    private func deleteAPIKey(for provider: LLMProvider) throws {
+    @discardableResult
+    private func deleteAPIKey(for provider: LLMProvider) throws -> Bool {
+        let account = keychainAccount(for: provider)
+        if apiKeyCache.isLoaded(account), apiKeyCache.cachedValue(for: account) == nil {
+            return false
+        }
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount(for: provider)
+            kSecAttrAccount as String: account
         ]
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }
+        apiKeyCache.store(nil, for: account)
+        return status == errSecSuccess
     }
 
     private static func configDirectoryURL() throws -> URL {
@@ -497,7 +562,7 @@ final class AIConfigManager {
     private func migrateLegacyKeyIfNeeded(_ key: String?, for provider: LLMProvider) {
         guard let key, !key.isEmpty else { return }
         do {
-            try setAPIKey(key, for: provider)
+            _ = try setAPIKey(key, for: provider)
             print("[AIConfigManager] Migrated \(provider.displayName) key from JSON to Keychain.")
         } catch {
             print("[AIConfigManager] Failed to migrate \(provider.displayName) key to Keychain: \(error)")

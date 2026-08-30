@@ -2,6 +2,57 @@ import XCTest
 @testable import TotalRec
 
 final class InsightPersistenceTests: XCTestCase {
+    func testAPIKeyMemoryCacheReadsEachAccountOnlyOnce() {
+        var cache = APIKeyMemoryCache()
+        var openAIReads = 0
+        var sambaNovaReads = 0
+
+        let firstOpenAIValue = cache.value(for: "openai") {
+            openAIReads += 1
+            return "openai-example"
+        }
+        let secondOpenAIValue = cache.value(for: "openai") {
+            openAIReads += 1
+            return "unexpected"
+        }
+        let firstSambaNovaValue = cache.value(for: "sambanova") {
+            sambaNovaReads += 1
+            return "sambanova-example"
+        }
+
+        XCTAssertEqual(firstOpenAIValue, "openai-example")
+        XCTAssertEqual(secondOpenAIValue, "openai-example")
+        XCTAssertEqual(firstSambaNovaValue, "sambanova-example")
+        XCTAssertEqual(openAIReads, 1)
+        XCTAssertEqual(sambaNovaReads, 1)
+    }
+
+    func testAPIKeyMemoryCacheAlsoCachesMissingCredentials() {
+        var cache = APIKeyMemoryCache()
+        var reads = 0
+
+        XCTAssertNil(cache.value(for: "missing") {
+            reads += 1
+            return nil
+        })
+        XCTAssertNil(cache.value(for: "missing") {
+            reads += 1
+            return "unexpected"
+        })
+
+        XCTAssertTrue(cache.isLoaded("missing"))
+        XCTAssertEqual(reads, 1)
+    }
+
+    func testAPIKeyMemoryCacheReflectsSuccessfulCredentialChanges() {
+        var cache = APIKeyMemoryCache()
+        cache.store("old-value", for: "openai")
+        cache.store("new-value", for: "openai")
+
+        XCTAssertTrue(cache.isLoaded("openai"))
+        XCTAssertEqual(cache.cachedValue(for: "openai"), "new-value")
+    }
+
     func testLegacyMeetingNotesDecodeMigratesToInsightArtifact() throws {
         let now = Date()
         let legacySession = LegacyRecordingSession(
@@ -93,6 +144,19 @@ final class InsightPersistenceTests: XCTestCase {
         XCTAssertEqual(configuration.normalizedInsightProvider, .openAI)
         XCTAssertEqual(configuration.defaultInsightModelID, LLMProvider.openAI.defaultModelID(for: .insights))
         XCTAssertEqual(configuration.nameSuggestionModelID, LLMProvider.openAI.defaultModelID(for: .nameSuggestions))
+    }
+
+    func testSettingsCategoriesCoverProviderTranscriptionAndInsightWorkflows() {
+        XCTAssertEqual(
+            TotalRecSettingsCategory.allCases,
+            [.providers, .transcription, .insights]
+        )
+        XCTAssertEqual(
+            TotalRecSettingsCategory.allCases.map(\.title),
+            ["Providers", "Transcription", "Insights"]
+        )
+        XCTAssertEqual(Set(TotalRecSettingsCategory.allCases.map(\.systemImage)).count, 3)
+        XCTAssertTrue(TotalRecSettingsCategory.allCases.allSatisfy { !$0.subtitle.isEmpty })
     }
 
     private func makeTemporaryDirectory() -> URL {

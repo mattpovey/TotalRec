@@ -14,6 +14,9 @@
 		220000000000000000000004 /* AppModelInsightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000015 /* AppModelInsightTests.swift */; };
 		220000000000000000000005 /* InsightPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000016 /* InsightPersistenceTests.swift */; };
 		220000000000000000000006 /* ResponsesTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000017 /* ResponsesTransportTests.swift */; };
+		220000000000000000000007 /* RecordingRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000018 /* RecordingRecoveryTests.swift */; };
+		220000000000000000000008 /* SessionAudioPlaybackControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220000000000000000000019 /* SessionAudioPlaybackControllerTests.swift */; };
+		220000000000000000000009 /* AppModelSessionStatusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22000000000000000000001A /* AppModelSessionStatusTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -36,6 +39,9 @@
 		220000000000000000000015 /* AppModelInsightTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelInsightTests.swift; sourceTree = "<group>"; };
 		220000000000000000000016 /* InsightPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightPersistenceTests.swift; sourceTree = "<group>"; };
 		220000000000000000000017 /* ResponsesTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResponsesTransportTests.swift; sourceTree = "<group>"; };
+		220000000000000000000018 /* RecordingRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingRecoveryTests.swift; sourceTree = "<group>"; };
+		220000000000000000000019 /* SessionAudioPlaybackControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionAudioPlaybackControllerTests.swift; sourceTree = "<group>"; };
+		22000000000000000000001A /* AppModelSessionStatusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelSessionStatusTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -102,8 +108,11 @@
 			isa = PBXGroup;
 			children = (
 				220000000000000000000015 /* AppModelInsightTests.swift */,
+				22000000000000000000001A /* AppModelSessionStatusTests.swift */,
 				220000000000000000000016 /* InsightPersistenceTests.swift */,
+				220000000000000000000018 /* RecordingRecoveryTests.swift */,
 				220000000000000000000017 /* ResponsesTransportTests.swift */,
+				220000000000000000000019 /* SessionAudioPlaybackControllerTests.swift */,
 				220000000000000000000012 /* TranscriptStateTests.swift */,
 				220000000000000000000013 /* TranscriptPlaybackControllerTests.swift */,
 			);
@@ -225,8 +234,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				220000000000000000000004 /* AppModelInsightTests.swift in Sources */,
+				220000000000000000000009 /* AppModelSessionStatusTests.swift in Sources */,
 				220000000000000000000005 /* InsightPersistenceTests.swift in Sources */,
+				220000000000000000000007 /* RecordingRecoveryTests.swift in Sources */,
 				220000000000000000000006 /* ResponsesTransportTests.swift in Sources */,
+				220000000000000000000008 /* SessionAudioPlaybackControllerTests.swift in Sources */,
 				220000000000000000000002 /* TranscriptPlaybackControllerTests.swift in Sources */,
 				220000000000000000000001 /* TranscriptStateTests.swift in Sources */,
 			);

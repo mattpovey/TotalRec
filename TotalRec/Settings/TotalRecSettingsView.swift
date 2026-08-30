@@ -1,6 +1,47 @@
 import SwiftUI
 import Combine
 
+enum TotalRecSettingsCategory: String, CaseIterable, Identifiable {
+    case providers
+    case transcription
+    case insights
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .providers:
+            return "Providers"
+        case .transcription:
+            return "Transcription"
+        case .insights:
+            return "Insights"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .providers:
+            return "key.horizontal"
+        case .transcription:
+            return "waveform.and.mic"
+        case .insights:
+            return "sparkles.rectangle.stack"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .providers:
+            return "Manage credentials, compatible endpoints, and shared model catalogs."
+        case .transcription:
+            return "Configure the private transcription server and speaker-name assistance."
+        case .insights:
+            return "Choose the default workflow, provider, and model for new insight artifacts."
+        }
+    }
+}
+
 struct TotalRecSettingsView: View {
     private static let contentColumnWidth: CGFloat = 720
     private static let apiKeyFieldWidth: CGFloat = 420
@@ -24,6 +65,7 @@ struct TotalRecSettingsView: View {
     @State private var openAIModelsError: String?
     @State private var sambaNovaModelsError: String?
     @State private var tScriptConfiguration: TScriptConfiguration
+    @State private var selectedCategory: TotalRecSettingsCategory = .providers
 
     private let llmModelCatalogService = LLMModelCatalogService()
 
@@ -84,35 +126,30 @@ struct TotalRecSettingsView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                settingsLead
-                providerCredentialsSection
-                insightDefaultsSection
-                if BuildFeatures.nameSuggestionsEnabled {
-                    nameSuggestionsSection
-                }
-                tScriptServerSection
+        TabView(selection: $selectedCategory) {
+            ForEach(TotalRecSettingsCategory.allCases) { category in
+                settingsPage(for: category)
+                    .tag(category)
+                    .tabItem {
+                        Label(category.title, systemImage: category.systemImage)
+                    }
+                    .accessibilityIdentifier("settingsCategory_\(category.rawValue)")
             }
-            .frame(maxWidth: Self.contentColumnWidth, alignment: .topLeading)
-            .padding(.horizontal, 24)
-            .padding(.vertical, 20)
-            .frame(maxWidth: .infinity, alignment: .center)
         }
-        .frame(minWidth: 640, minHeight: 440)
+        .frame(minWidth: 700, idealWidth: 800, minHeight: 500, idealHeight: 620)
         .onChange(of: nameSuggestionProvider) { _, newProvider in
             do {
                 try AIConfigManager.shared.setNameSuggestionProvider(newProvider.rawValue)
                 nameSuggestionModelID = AIConfigManager.shared.configuration.nameSuggestionModelID
             } catch {
-                appModel.setStatusMessage("Failed to save name suggestion provider: \(error.localizedDescription)")
+                appModel.showNotice("Failed to save name suggestion provider: \(error.localizedDescription)", style: .error)
             }
         }
         .onChange(of: defaultInsightWorkflow) { _, newWorkflow in
             do {
                 try AIConfigManager.shared.setDefaultInsightWorkflow(newWorkflow)
             } catch {
-                appModel.setStatusMessage("Failed to save default insight workflow: \(error.localizedDescription)")
+                appModel.showNotice("Failed to save default insight workflow: \(error.localizedDescription)", style: .error)
             }
         }
         .onChange(of: defaultInsightProvider) { _, newProvider in
@@ -120,35 +157,35 @@ struct TotalRecSettingsView: View {
                 try AIConfigManager.shared.setDefaultInsightProvider(newProvider)
                 defaultInsightModelID = AIConfigManager.shared.configuration.defaultInsightModelID
             } catch {
-                appModel.setStatusMessage("Failed to save default insight provider: \(error.localizedDescription)")
+                appModel.showNotice("Failed to save default insight provider: \(error.localizedDescription)", style: .error)
             }
         }
         .onChange(of: defaultInsightModelID) { _, newModelID in
             do {
                 try AIConfigManager.shared.setDefaultInsightModelID(newModelID)
             } catch {
-                appModel.setStatusMessage("Failed to save default insight model: \(error.localizedDescription)")
+                appModel.showNotice("Failed to save default insight model: \(error.localizedDescription)", style: .error)
             }
         }
         .onChange(of: nameSuggestionModelID) { _, newModelID in
             do {
                 try AIConfigManager.shared.setNameSuggestionModelID(newModelID)
             } catch {
-                appModel.setStatusMessage("Failed to save name suggestion model: \(error.localizedDescription)")
+                appModel.showNotice("Failed to save name suggestion model: \(error.localizedDescription)", style: .error)
             }
         }
         .onChange(of: openAIAPIKey) { _, newKey in
             do {
                 try AIConfigManager.shared.updateOpenAIKey(newKey.isEmpty ? nil : newKey)
             } catch {
-                appModel.setStatusMessage("Failed to save OpenAI key: \(error.localizedDescription)")
+                appModel.showNotice("Failed to save OpenAI key: \(error.localizedDescription)", style: .error)
             }
         }
         .onChange(of: sambaNovaAPIKey) { _, newKey in
             do {
                 try AIConfigManager.shared.updateSambaNovaKey(newKey.isEmpty ? nil : newKey)
             } catch {
-                appModel.setStatusMessage("Failed to save SambaNova key: \(error.localizedDescription)")
+                appModel.showNotice("Failed to save SambaNova key: \(error.localizedDescription)", style: .error)
             }
         }
         .onChange(of: sambaNovaBaseURL) { oldValue, newValue in
@@ -163,7 +200,7 @@ struct TotalRecSettingsView: View {
                     defaultInsightModelID = AIConfigManager.shared.configuration.defaultInsightModelID
                 }
             } catch {
-                appModel.setStatusMessage("Failed to save SambaNova base URL: \(error.localizedDescription)")
+                appModel.showNotice("Failed to save SambaNova base URL: \(error.localizedDescription)", style: .error)
             }
         }
         .onChange(of: tScriptConfiguration) { oldValue, newValue in
@@ -174,13 +211,50 @@ struct TotalRecSettingsView: View {
         }
     }
 
-    private var settingsLead: some View {
+    private func settingsPage(for category: TotalRecSettingsCategory) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                settingsLead(for: category)
+
+                if let notice = appModel.transientNotice {
+                    TransientNoticeBanner(
+                        notice: notice,
+                        onDismiss: appModel.dismissTransientNotice
+                    )
+                    .id(notice.id)
+                }
+
+                settingsSections(for: category)
+            }
+            .frame(maxWidth: Self.contentColumnWidth, alignment: .topLeading)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private func settingsLead(for category: TotalRecSettingsCategory) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Credentials and defaults")
+            Text(category.title)
                 .font(.title3.weight(.semibold))
-            Text("These settings apply across capture, transcription, speaker cleanup, and insight generation.")
+            Text(category.subtitle)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func settingsSections(for category: TotalRecSettingsCategory) -> some View {
+        switch category {
+        case .providers:
+            providerCredentialsSection
+        case .transcription:
+            tScriptServerSection
+            if BuildFeatures.nameSuggestionsEnabled {
+                nameSuggestionsSection
+            }
+        case .insights:
+            insightDefaultsSection
         }
     }
 
@@ -423,7 +497,7 @@ struct TotalRecSettingsView: View {
         do {
             try AIConfigManager.shared.updateTScriptConfiguration(newValue)
         } catch {
-            appModel.setStatusMessage("Failed to save TScript settings: \(error.localizedDescription)")
+            appModel.showNotice("Failed to save TScript settings: \(error.localizedDescription)", style: .error)
         }
     }
 

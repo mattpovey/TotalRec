@@ -32,6 +32,7 @@ struct TranscriptSegmentBrowser<InlineInspector: View>: View {
     @ViewBuilder let inlineInspector: (TranscriptSegment, TranscriptSegmentBrowserPlaybackState) -> InlineInspector
 
     @StateObject private var playbackController = TranscriptPlaybackController()
+    @State private var isInspectorVisible = true
 
     var body: some View {
         TranscriptSurfacePanel(title: title, subtitle: subtitle) {
@@ -41,7 +42,24 @@ struct TranscriptSegmentBrowser<InlineInspector: View>: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                segmentWorkspace
+                VStack(alignment: .leading, spacing: 10) {
+#if os(macOS)
+                    HStack {
+                        Spacer(minLength: 0)
+                        Button {
+                            isInspectorVisible.toggle()
+                        } label: {
+                            Label(
+                                isInspectorVisible ? "Hide Inspector" : "Show Inspector",
+                                systemImage: isInspectorVisible ? "sidebar.trailing" : "sidebar.trailing"
+                            )
+                        }
+                        .totalRecGlassButton()
+                        .controlSize(.small)
+                    }
+#endif
+                    segmentWorkspace
+                }
             }
         }
         .frame(minWidth: 460, maxWidth: .infinity, alignment: .topLeading)
@@ -56,9 +74,11 @@ struct TranscriptSegmentBrowser<InlineInspector: View>: View {
             updatePlaybackSession()
         }
         .onChange(of: visibleSegmentIDs) { _, newValue in
-            guard let selectedSegmentID = playbackController.selectedSegmentID else { return }
-            guard !newValue.contains(selectedSegmentID) else { return }
-            playbackController.stopAndClearSelection()
+            if let selectedSegmentID = playbackController.selectedSegmentID,
+               !newValue.contains(selectedSegmentID) {
+                playbackController.stopAndClearSelection()
+            }
+            playbackController.selectFirstAvailableSegment(from: newValue)
         }
         .onDisappear {
             playbackController.stopAndClearSelection()
@@ -95,19 +115,25 @@ struct TranscriptSegmentBrowser<InlineInspector: View>: View {
 
     private func updatePlaybackSession() {
         playbackController.updateSession(audioURL: audioURL, audioDuration: audioDuration, transcript: transcript)
+        playbackController.selectFirstAvailableSegment(from: visibleSegmentIDs)
     }
 
     @ViewBuilder
     private var segmentWorkspace: some View {
         #if os(macOS)
-        HSplitView {
-            segmentList
-                .frame(minWidth: 320, idealWidth: 380, maxWidth: 440, maxHeight: .infinity, alignment: .topLeading)
+        if isInspectorVisible {
+            HSplitView {
+                segmentList
+                    .frame(minWidth: 320, idealWidth: 380, maxWidth: 440, maxHeight: .infinity, alignment: .topLeading)
 
-            segmentInspector
-                .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                segmentInspector
+                    .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .frame(minHeight: 420, alignment: .topLeading)
+        } else {
+            segmentList
+                .frame(minWidth: 320, maxWidth: .infinity, minHeight: 420, alignment: .topLeading)
         }
-        .frame(minHeight: 420, alignment: .topLeading)
         #else
         VStack(alignment: .leading, spacing: 14) {
             segmentList
@@ -122,10 +148,12 @@ struct TranscriptSegmentBrowser<InlineInspector: View>: View {
     private var segmentList: some View {
         TranscriptListContainer {
             List(selection: selectedSegmentBinding) {
-                ForEach(segments) { segment in
+                ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
                     TranscriptSegmentRow(
                         segment: segment,
-                        speakerDisplay: transcript.hasSpeakerLabels ? transcriptSpeakerDisplay(for: segment, in: transcript) : nil,
+                        speakerDisplay: shouldShowSpeakerIdentity(at: index)
+                            ? transcriptSpeakerDisplay(for: segment, in: transcript)
+                            : nil,
                         isSelected: playbackController.selectedSegmentID == segment.id,
                         isActive: playbackController.activeSegmentID == segment.id,
                         isEmphasized: isSegmentEmphasized(segment)
@@ -184,6 +212,13 @@ struct TranscriptSegmentBrowser<InlineInspector: View>: View {
     private func isSegmentEmphasized(_ segment: TranscriptSegment) -> Bool {
         guard mode == .speakerEditing, let emphasizedSpeakerLabel else { return true }
         return transcriptSegmentMatchesSpeakerLabel(segment, label: emphasizedSpeakerLabel)
+    }
+
+    private func shouldShowSpeakerIdentity(at index: Int) -> Bool {
+        guard transcript.hasSpeakerLabels, segments.indices.contains(index) else { return false }
+        guard index > 0 else { return true }
+        return TranscriptState.canonicalSpeakerLabel(segments[index].speakerLabel) !=
+            TranscriptState.canonicalSpeakerLabel(segments[index - 1].speakerLabel)
     }
 }
 

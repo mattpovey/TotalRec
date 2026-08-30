@@ -131,7 +131,7 @@ struct SessionStore {
         return session
     }
 
-    func save(_ session: RecordingSession) throws {
+    func save(_ session: RecordingSession, makeCurrent: Bool = true) throws {
         try ensureDirectoryExists(at: sessionsDirectoryURL())
         try ensureDirectoryExists(at: sessionDirectoryURL(for: session))
 
@@ -143,8 +143,10 @@ struct SessionStore {
         let summaryData = try encoder.encode(session.summary)
         try summaryData.write(to: sessionSummaryURL(for: session.id), options: [.atomic])
 
-        let pointerData = try encoder.encode(CurrentSessionPointer(sessionID: session.id))
-        try pointerData.write(to: currentSessionPointerURL(), options: [.atomic])
+        if makeCurrent {
+            let pointerData = try encoder.encode(CurrentSessionPointer(sessionID: session.id))
+            try pointerData.write(to: currentSessionPointerURL(), options: [.atomic])
+        }
     }
 
     func setCurrentSession(_ sessionID: UUID) throws {

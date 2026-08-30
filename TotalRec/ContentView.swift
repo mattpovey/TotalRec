@@ -183,6 +183,7 @@ struct ContentView: View {
     @State private var isSessionDiagnosticsExpanded = false
     @State private var sessionPendingDeletion: RecordingSessionSummary?
     @State private var pendingTranscriptNavigationAfterTranscription = false
+    @StateObject private var sessionAudioPlayer = SessionAudioPlaybackController()
 
     private let nameSuggestionService = NameSuggestionService()
     private let llmModelCatalogService = LLMModelCatalogService()
@@ -532,16 +533,7 @@ struct ContentView: View {
 
     private var captureReadinessItems: [ReadinessItem] {
         [
-            ReadinessItem(
-                title: appModel.audioURL == nil ? "Session audio pending" : "Session audio ready",
-                detail: appModel.isRecording
-                    ? "Recording is active. Stop when you want to prepare the session audio for transcription."
-                    : (appModel.audioURL == nil
-                        ? "Start a protected recording or import audio into this session."
-                        : "Audio has been prepared\(formattedDurationSuffix) and is ready for transcription."),
-                systemImage: appModel.isRecording ? "record.circle.fill" : (appModel.audioURL == nil ? "waveform.badge.plus" : "checkmark.circle.fill"),
-                tint: appModel.isRecording ? TotalRecGlass.recordingRed : (appModel.audioURL == nil ? TotalRecGlass.captureBlue : TotalRecGlass.successGreen)
-            ),
+            captureAudioReadinessItem,
             screenCaptureReadinessItem,
             microphoneReadinessItem,
             ReadinessItem(
@@ -553,6 +545,59 @@ struct ContentView: View {
                 tint: appModel.hasProtectedActivity ? TotalRecGlass.captureBlue : TotalRecGlass.successGreen
             )
         ]
+    }
+
+    private var captureAudioReadinessItem: ReadinessItem {
+        if appModel.activeSession?.stage == .failed, appModel.audioURL == nil {
+            switch appModel.rawCaptureFileState {
+            case .candidate:
+                return ReadinessItem(
+                    title: "Raw capture needs recovery",
+                    detail: "The recording did not finish cleanly. Retry audio recovery from Session Details.",
+                    systemImage: "arrow.triangle.2.circlepath.circle.fill",
+                    tint: TotalRecGlass.warningAmber
+                )
+            case .empty:
+                return ReadinessItem(
+                    title: "Recording is empty",
+                    detail: "No audio was written to the raw capture. Check recording permissions before trying again.",
+                    systemImage: "exclamationmark.triangle.fill",
+                    tint: TotalRecGlass.warningAmber
+                )
+            case .missing:
+                return ReadinessItem(
+                    title: "Recording is unavailable",
+                    detail: "The expected raw capture file is missing. Reveal the session folder for details.",
+                    systemImage: "waveform.slash",
+                    tint: TotalRecGlass.warningAmber
+                )
+            }
+        }
+
+        return ReadinessItem(
+            title: appModel.audioURL == nil ? "Session audio pending" : "Session audio ready",
+            detail: appModel.isRecording
+                ? "Recording is active. Stop when you want to prepare the session audio for transcription."
+                : (appModel.audioURL == nil
+                    ? "Start a protected recording or import audio into this session."
+                    : "Audio has been prepared\(formattedDurationSuffix) and is ready for transcription."),
+            systemImage: appModel.isRecording ? "record.circle.fill" : (appModel.audioURL == nil ? "waveform.badge.plus" : "checkmark.circle.fill"),
+            tint: appModel.isRecording ? TotalRecGlass.recordingRed : (appModel.audioURL == nil ? TotalRecGlass.captureBlue : TotalRecGlass.successGreen)
+        )
+    }
+
+    private var rawCaptureDisplayText: String {
+        if appModel.isRecording {
+            return "Recording in progress"
+        }
+        if appModel.activeSession?.stage == .mixingDown {
+            return "Finalizing capture"
+        }
+        return appModel.rawCaptureFileState.displayText
+    }
+
+    private var rawCaptureNeedsAttention: Bool {
+        appModel.activeSession?.stage == .failed && !appModel.rawCaptureFileState.canAttemptRecovery
     }
 
     private var transcriptionReadinessItems: [ReadinessItem] {
@@ -831,6 +876,10 @@ struct ContentView: View {
         var items: [DiagnosticItem] = []
 
         if let activeSession = appModel.activeSession {
+            if activeSession.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                items.append(DiagnosticItem(label: "Session title", value: activeSession.displayTitle))
+            }
+            items.append(DiagnosticItem(label: "Source", value: activeSession.sourceDescription))
             items.append(DiagnosticItem(label: "Session stage", value: sessionStageTitle(activeSession.stage)))
             items.append(DiagnosticItem(label: "Status", value: activeSession.statusMessage))
             items.append(DiagnosticItem(label: "Session folder", value: appModel.activeSessionDirectoryURL?.path ?? activeSession.sessionDirectoryName))
@@ -922,7 +971,7 @@ struct ContentView: View {
     private var sessionSidebarPane: some View {
         SessionSidebarView(
             sessionPendingDeletion: $sessionPendingDeletion,
-            onToggleRecording: toggleRecordingFromSidebar,
+            onToggleRecording: toggleRecording,
             onImportAudio: {
                 selectedSection = .capture
                 showImportOptionsDialog = true
@@ -952,6 +1001,7 @@ struct ContentView: View {
             .onAppear {
                 normalizeSelectedTranscriptStep(preferred: defaultTranscriptStep)
                 syncInsightEditorState(from: appModel.activeSession?.insightSettings)
+                syncSessionAudioPlayer()
             }
             .onChange(of: appModel.transcriptState) { oldValue, newValue in
                 if pendingTranscriptNavigationAfterTranscription, oldValue != newValue {
@@ -973,10 +1023,24 @@ struct ContentView: View {
                 pendingTranscriptNavigationAfterTranscription = false
                 normalizeSelectedTranscriptStep(preferred: defaultTranscriptStep)
                 syncInsightEditorState(from: appModel.activeSession?.insightSettings)
+                syncSessionAudioPlayer()
+            }
+            .onChange(of: appModel.audioURL) { _, _ in
+                syncSessionAudioPlayer()
+            }
+            .onChange(of: appModel.mixedAudioDuration) { _, _ in
+                syncSessionAudioPlayer()
             }
             .onChange(of: selectedSection) { _, newSection in
                 if newSection == .transcript {
                     normalizeSelectedTranscriptStep()
+                } else if newSection == .insights {
+                    sessionAudioPlayer.pause()
+                }
+            }
+            .onChange(of: selectedTranscriptStep) { _, newStep in
+                if newStep != .run {
+                    sessionAudioPlayer.pause()
                 }
             }
             .onChange(of: appModel.insightArtifactContent) { oldValue, newValue in
@@ -1032,7 +1096,7 @@ struct ContentView: View {
             titleVisibility: .visible,
             presenting: sessionPendingDeletion
         ) { session in
-            Button("Delete \(session.sourceDescription)", role: .destructive) {
+            Button("Delete \(session.displayTitle)", role: .destructive) {
                 appModel.deleteSession(session.id)
                 if appModel.activeSession == nil {
                     selectedSection = .capture
@@ -1075,7 +1139,7 @@ struct ContentView: View {
                 do {
                     try AIConfigManager.shared.setDefaultProvider(newProvider.storageValue)
                 } catch {
-                    appModel.setStatusMessage("Failed to save default provider: \(error.localizedDescription)")
+                    appModel.showNotice("Failed to save default provider: \(error.localizedDescription)", style: .error)
                 }
             }
             .onChange(of: tScriptConfiguration) { oldValue, newValue in
@@ -1147,6 +1211,15 @@ struct ContentView: View {
 
     private var mainContent: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if let notice = appModel.transientNotice {
+                TransientNoticeBanner(
+                    notice: notice,
+                    onDismiss: appModel.dismissTransientNotice
+                )
+                .id(notice.id)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
             if let recoveryNotice = appModel.recoveryNotice {
                 statusBanner(
                     recoveryNotice,
@@ -1466,54 +1539,77 @@ struct ContentView: View {
         .scrollIndicators(.hidden)
     }
 
-    private func readinessCard(
+    private func readinessSummary(
         title: String,
         subtitle: String,
         items: [ReadinessItem]
     ) -> some View {
         pageCard {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.headline)
-                    Text(subtitle)
-                        .font(.footnote)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(title)
+                            .font(.subheadline.weight(.semibold))
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Text("\(items.count) checks")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
                 LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 220), spacing: 10, alignment: .top)],
+                    columns: [GridItem(.adaptive(minimum: 150), spacing: 8, alignment: .leading)],
                     alignment: .leading,
-                    spacing: 10
+                    spacing: 8
                 ) {
                     ForEach(items) { item in
-                        readinessTile(item)
+                        Label(item.title, systemImage: item.systemImage)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .totalRecStaticPill(tint: item.tint)
+                            .accessibilityLabel("\(item.title). \(item.detail)")
                     }
+                }
+
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(items) { item in
+                            readinessDetailRow(item)
+                        }
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Text("Review readiness details")
+                        .font(.caption.weight(.semibold))
                 }
             }
         }
     }
 
-    private func readinessTile(_ item: ReadinessItem) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: item.systemImage)
-                    .foregroundStyle(item.tint)
-                    .frame(width: 18)
+    private func readinessDetailRow(_ item: ReadinessItem) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: item.systemImage)
+                .foregroundStyle(TotalRecGlass.accentForeground(item.tint))
+                .frame(width: 18)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(item.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                    Text(item.detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .font(.caption.weight(.semibold))
+                Text(item.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
-        .totalRecStaticRoundedRect(cornerRadius: 14, tint: item.tint)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var sessionDiagnosticsCard: some View {
@@ -1528,6 +1624,28 @@ struct ContentView: View {
                         systemImage: "exclamationmark.triangle.fill",
                         tint: TotalRecGlass.warningAmber
                     )
+
+                    HStack(spacing: 10) {
+                        if appModel.canRetryRecordingFinalization {
+                            Button {
+                                Task {
+                                    await appModel.retryRecordingFinalization()
+                                }
+                            } label: {
+                                Label("Retry Audio Recovery", systemImage: "arrow.triangle.2.circlepath")
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+
+#if os(macOS)
+                        if appModel.activeSessionDirectoryURL != nil {
+                            Button(action: revealActiveSessionFolder) {
+                                Label("Reveal Session Folder", systemImage: "folder")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+#endif
+                    }
                 }
 
                 DisclosureGroup(isExpanded: $isSessionDiagnosticsExpanded) {
@@ -1604,43 +1722,54 @@ struct ContentView: View {
                 detail: appModel.audioURL == nil ? nil : "Audio ready\(formattedDurationSuffix)"
             )
 
-            readinessCard(
+            capturePrimaryActionsCard
+
+            readinessSummary(
                 title: "Capture readiness",
-                subtitle: "Permissions, session safety, and audio availability.",
+                subtitle: "Check the essentials, then record or import.",
                 items: captureReadinessItems
             )
 
-            pageCard {
-                Text("Session Files")
-                    .font(.headline)
+            sessionAudioPlayerCard
 
-                captureActionLayout
+            if appModel.isRecording || appModel.tempMOVURL != nil || appModel.audioURL != nil {
+                pageCard {
+                    Text("Session Files")
+                        .font(.headline)
 
-                Divider()
-
-                if appModel.isRecording {
-                    statusBanner(
-                        "Recording continues even if you close the main window. Use the explicit stop action here or from the menu bar.",
-                        systemImage: "shield.lefthalf.filled",
-                        tint: TotalRecGlass.captureBlue
-                    )
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    if let mov = appModel.tempMOVURL {
-                        LabeledContent("Raw capture") {
-                            Text(mov.lastPathComponent)
-                                .foregroundStyle(.secondary)
-                        }
+                    if appModel.isRecording {
+                        statusBanner(
+                            "Recording continues even if you close the main window. Use the explicit stop action here or from the menu bar.",
+                            systemImage: "shield.lefthalf.filled",
+                            tint: TotalRecGlass.captureBlue
+                        )
                     }
 
-                    if let audioURL = appModel.audioURL {
-                        LabeledContent("Session audio") {
-                            Text(audioURL.lastPathComponent)
-                                .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 10) {
+                        if let mov = appModel.tempMOVURL {
+                            LabeledContent("Raw capture") {
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text(rawCaptureDisplayText)
+                                        .foregroundStyle(rawCaptureNeedsAttention ? TotalRecGlass.accentForeground(TotalRecGlass.warningAmber) : Color.secondary)
+                                    Text(mov.lastPathComponent)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                        }
+
+                        if let audioURL = appModel.audioURL {
+                            LabeledContent("Session audio") {
+                                Text(audioURL.lastPathComponent)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
+            }
+
+            if appModel.audioURL != nil || appModel.transcriptState.hasDisplayText {
+                captureExportsCard
             }
 
             sessionDiagnosticsCard
@@ -1670,40 +1799,122 @@ struct ContentView: View {
         }
     }
 
-    private var captureActionLayout: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                captureButtons
-                Spacer(minLength: 0)
+    private var capturePrimaryActionsCard: some View {
+        pageCard {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Capture Audio")
+                    .font(.headline)
+
+                Text(capturePrimaryActionDescription)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                captureButtons
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    capturePrimaryButtons
+                    Spacer(minLength: 0)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    capturePrimaryButtons
+                }
             }
         }
     }
 
-    private var captureButtons: some View {
+    private var capturePrimaryActionDescription: String {
+        if appModel.isRecording {
+            return "Recording is protected in the current session. Stop when you are ready to prepare the audio."
+        }
+        if appModel.audioURL != nil {
+            return "This session already has audio. Import a replacement or start a fresh recording session."
+        }
+        return "Start a protected system-audio recording or bring in an existing audio file."
+    }
+
+    private var capturePrimaryButtons: some View {
         Group {
-            Button(action: saveAudio) {
-                Label("Save Audio…", systemImage: "square.and.arrow.down")
+            Button(action: toggleRecording) {
+                Label(
+                    appModel.isRecording ? "Stop Recording" : "Start Recording",
+                    systemImage: appModel.isRecording ? "stop.fill" : "record.circle"
+                )
             }
-                .totalRecGlassButton()
-                .disabled(appModel.audioURL == nil)
+            .buttonStyle(.borderedProminent)
+            .tint(appModel.isRecording ? TotalRecGlass.recordingRed : TotalRecGlass.captureBlue)
+            .disabled(appModel.isBusy && !appModel.isRecording)
+            .keyboardShortcut("r", modifiers: [.command])
 
             Button {
-                copyTranscriptAsMarkdown()
+                showImportOptionsDialog = true
             } label: {
-                Label("Copy Transcript", systemImage: "doc.on.doc")
+                Label("Import Audio…", systemImage: "square.and.arrow.down.on.square")
             }
-            .totalRecGlassButton()
-            .disabled(!appModel.transcriptState.hasDisplayText)
+            .buttonStyle(.bordered)
+            .disabled(appModel.isBusy)
 
-            Button(action: saveTranscript) {
-                Label("Save Transcript…", systemImage: "square.and.arrow.down")
+            if appModel.activeSession != nil {
+                Button {
+                    appModel.showNewSessionWorkspace()
+                } label: {
+                    Label("Start Fresh", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .disabled(appModel.hasProtectedActivity)
             }
+        }
+    }
+
+    private var captureExportsCard: some View {
+        pageCard {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Export")
+                    .font(.headline)
+                Text("Save completed session artifacts or copy the transcript for use elsewhere.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            captureExportLayout
+        }
+    }
+
+    private var captureExportLayout: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                captureExportButtons
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                captureExportButtons
+            }
+        }
+    }
+
+    private var captureExportButtons: some View {
+        Group {
+            if appModel.audioURL != nil {
+                Button(action: saveAudio) {
+                    Label("Save Audio…", systemImage: "square.and.arrow.down")
+                }
                 .totalRecGlassButton()
-                .disabled(appModel.transcriptState.isEmpty)
+            }
+
+            if appModel.transcriptState.hasDisplayText {
+                Button {
+                    copyTranscriptAsMarkdown()
+                } label: {
+                    Label("Copy Transcript", systemImage: "doc.on.doc")
+                }
+                .totalRecGlassButton()
+
+                Button(action: saveTranscript) {
+                    Label("Save Transcript…", systemImage: "square.and.arrow.down")
+                }
+                .totalRecGlassButton()
+            }
         }
     }
 
@@ -1762,15 +1973,29 @@ struct ContentView: View {
 
     private var transcriptRunStepContent: some View {
         VStack(alignment: .leading, spacing: 16) {
+            sessionAudioPlayerCard
             transcriptionSetupCard
             transcriptRunActionCard
-            readinessCard(
+            readinessSummary(
                 title: "Transcription readiness",
                 subtitle: "Provider setup, audio availability, and hint quality.",
                 items: transcriptionReadinessItems
             )
             sessionDiagnosticsCard
         }
+    }
+
+    private var sessionAudioPlayerCard: some View {
+        pageCard {
+            SessionAudioPlayerView(controller: sessionAudioPlayer)
+        }
+    }
+
+    private func syncSessionAudioPlayer() {
+        sessionAudioPlayer.updateSession(
+            audioURL: appModel.audioURL,
+            duration: appModel.mixedAudioDuration
+        )
     }
 
     private var transcriptRunActionCard: some View {
@@ -1856,7 +2081,7 @@ struct ContentView: View {
                     areSuggestionsEnabled: BuildFeatures.nameSuggestionsEnabled && nameSuggestionProvider != .disabled,
                     suggestionProviderName: nameSuggestionProviderSummary,
                     onStatusMessage: { message in
-                        appModel.setStatusMessage(message)
+                        appModel.showNotice(message)
                     }
                 )
             } else {
@@ -2413,7 +2638,7 @@ struct ContentView: View {
                 detailTint: hasTranscriptDisplayText ? TotalRecGlass.successGreen : TotalRecGlass.warningAmber
             )
 
-            readinessCard(
+            readinessSummary(
                 title: "Insights readiness",
                 subtitle: "Transcript, provider setup, and current artifact state.",
                 items: insightsReadinessItems
@@ -2646,13 +2871,13 @@ struct ContentView: View {
         let trimmedPrompt = customInsightsPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if useCustomInsightsPrompt && trimmedPrompt.isEmpty {
             appModel.insightRunError = "Enter a custom prompt or disable the custom prompt override."
-            appModel.setStatusMessage("Insight generation failed: Custom prompt required.")
+            appModel.showNotice("Insight generation failed: Custom prompt required.", style: .warning)
             return
         }
 
         if !isAPIKeyConfigured(for: defaultInsightProvider) {
             appModel.insightRunError = "\(defaultInsightProvider.displayName) API key missing."
-            appModel.setStatusMessage("Insight generation failed: \(defaultInsightProvider.displayName) API key missing.")
+            appModel.showNotice("Insight generation failed: \(defaultInsightProvider.displayName) API key missing.", style: .warning)
             openAppSettings()
             return
         }
@@ -2684,30 +2909,30 @@ struct ContentView: View {
         guard appModel.audioURL != nil else { return }
 
         if provider == .openAI && !isOpenAIKeyConfigured {
-            appModel.setStatusMessage("OpenAI API key missing. Open Settings to configure it.")
+            appModel.showNotice("OpenAI API key missing. Open Settings to configure it.", style: .warning)
             openAppSettings()
             return
         }
 
         if provider == .openAI && hasPartialKnownSpeaker {
-            appModel.setStatusMessage("Please provide both a Name and a Sample for each known speaker, or clear the incomplete rows.")
+            appModel.showNotice("Please provide both a Name and a Sample for each known speaker, or clear the incomplete rows.", style: .warning)
             return
         }
 
         if provider == .tscript && !tScriptBaseURLConfigured {
-            appModel.setStatusMessage("TScript base URL missing. Open Settings to configure it.")
+            appModel.showNotice("TScript base URL missing. Open Settings to configure it.", style: .warning)
             openAppSettings()
             return
         }
 
         if provider == .tscript && tScriptRequiresHTTPOverride {
-            appModel.setStatusMessage(tScriptTransportReadinessItem.detail)
+            appModel.showNotice(tScriptTransportReadinessItem.detail, style: .warning)
             openAppSettings()
             return
         }
 
         if provider == .tscript, let model = selectedTScriptModel, !model.runtimeAvailable {
-            appModel.setStatusMessage("Selected TScript model is unavailable. Refresh models or choose another model.")
+            appModel.showNotice("Selected TScript model is unavailable. Refresh models or choose another model.", style: .warning)
             return
         }
 
@@ -2779,7 +3004,7 @@ struct ContentView: View {
         do {
             try AIConfigManager.shared.updateTScriptConfiguration(newValue)
         } catch {
-            appModel.setStatusMessage("Failed to save TScript settings: \(error.localizedDescription)")
+            appModel.showNotice("Failed to save TScript settings: \(error.localizedDescription)", style: .error)
         }
 
         let oldBaseURL = oldValue.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2831,7 +3056,7 @@ struct ContentView: View {
                     }
                     try FileManager.default.copyItem(at: url, to: destination)
                 } catch {
-                    appModel.setStatusMessage("Save failed: \(error.localizedDescription)")
+                    appModel.showNotice("Save failed: \(error.localizedDescription)", style: .error)
                 }
             }
         }
@@ -2866,10 +3091,17 @@ struct ContentView: View {
                 do {
                     try writeTranscript(stateToSave, to: destination, format: coordinator.selectedFormat)
                 } catch {
-                    appModel.setStatusMessage("Save failed: \(error.localizedDescription)")
+                    appModel.showNotice("Save failed: \(error.localizedDescription)", style: .error)
                 }
             }
         }
+#endif
+    }
+
+    private func revealActiveSessionFolder() {
+#if os(macOS)
+        guard let directoryURL = appModel.activeSessionDirectoryURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([directoryURL])
 #endif
     }
 
@@ -2889,7 +3121,7 @@ struct ContentView: View {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(string, forType: .string)
-        appModel.setStatusMessage(successMessage)
+        appModel.showNotice(successMessage, style: .success)
 #endif
     }
 
@@ -2944,7 +3176,7 @@ struct ContentView: View {
                 do {
                     try writeInsightArtifact(artifact, to: destination, format: coordinator.selectedFormat)
                 } catch {
-                    appModel.setStatusMessage("Save failed: \(error.localizedDescription)")
+                    appModel.showNotice("Save failed: \(error.localizedDescription)", style: .error)
                 }
             }
         }
@@ -2970,7 +3202,7 @@ struct ContentView: View {
     private func importAudioFromFileSystem() {
         guard !appModel.isImportingAudio else { return }
         guard !appModel.isRecording else {
-            appModel.setStatusMessage("Stop recording before importing audio.")
+            appModel.showNotice("Stop recording before importing audio.", style: .warning)
             return
         }
 #if os(macOS)
@@ -2984,20 +3216,20 @@ struct ContentView: View {
             }
         }
 #else
-        appModel.setStatusMessage("File import is only supported on macOS.")
+        appModel.showNotice("File import is only supported on macOS.", style: .warning)
 #endif
     }
 
     private func beginURLImport(from rawString: String) {
         let trimmed = rawString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            appModel.setStatusMessage("Enter a valid audio URL.")
+            appModel.showNotice("Enter a valid audio URL.", style: .warning)
             return
         }
         guard let remoteURL = URL(string: trimmed),
               let scheme = remoteURL.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else {
-            appModel.setStatusMessage("Unsupported audio URL. Use http or https.")
+            appModel.showNotice("Unsupported audio URL. Use http or https.", style: .warning)
             return
         }
 
@@ -3006,7 +3238,7 @@ struct ContentView: View {
         Task { await appModel.importAudioFromRemoteURL(remoteURL) }
     }
 
-    private func toggleRecordingFromSidebar() {
+    private func toggleRecording() {
         selectedSection = .capture
         if appModel.isRecording {
             Task { await appModel.stopRecording() }
@@ -3039,6 +3271,9 @@ private struct SessionSidebarView: View {
 
     @Binding var sessionPendingDeletion: RecordingSessionSummary?
 
+    @State private var sessionPendingRename: RecordingSessionSummary?
+    @State private var sessionTitleDraft = ""
+
     let onToggleRecording: () -> Void
     let onImportAudio: () -> Void
     let onClearWorkspace: () -> Void
@@ -3049,6 +3284,17 @@ private struct SessionSidebarView: View {
             set: { newValue in
                 guard let newValue else { return }
                 appModel.selectSession(newValue)
+            }
+        )
+    }
+
+    private var renameSessionDialogBinding: Binding<Bool> {
+        Binding(
+            get: { sessionPendingRename != nil },
+            set: { newValue in
+                if !newValue {
+                    sessionPendingRename = nil
+                }
             }
         )
     }
@@ -3090,6 +3336,15 @@ private struct SessionSidebarView: View {
                         )
                         .tag(Optional(session.id))
                         .contextMenu {
+                            Button {
+                                sessionTitleDraft = session.displayTitle
+                                sessionPendingRename = session
+                            } label: {
+                                Label("Rename Session…", systemImage: "pencil")
+                            }
+
+                            Divider()
+
                             Button(role: .destructive) {
                                 sessionPendingDeletion = session
                             } label: {
@@ -3105,6 +3360,26 @@ private struct SessionSidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .alert(
+            "Rename Session",
+            isPresented: renameSessionDialogBinding,
+            presenting: sessionPendingRename
+        ) { session in
+            TextField("Session title", text: $sessionTitleDraft)
+
+            Button("Save") {
+                if appModel.renameSession(session.id, to: sessionTitleDraft) {
+                    sessionPendingRename = nil
+                }
+            }
+            .keyboardShortcut(.defaultAction)
+
+            Button("Cancel", role: .cancel) {
+                sessionPendingRename = nil
+            }
+        } message: { session in
+            Text("The original source remains available in Session Details. Current source: \(session.sourceDescription)")
+        }
     }
 }
 
@@ -3142,11 +3417,12 @@ private struct SessionSidebarRow: View {
     let isLocked: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(session.sourceDescription)
+                Text(session.displayTitle)
                     .font(.headline)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .help(session.displayTitle)
 
                 Spacer(minLength: 8)
 
@@ -3155,12 +3431,7 @@ private struct SessionSidebarRow: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text(session.statusMessage)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-
-            HStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Label(session.stage.totalRecStatusLabel, systemImage: session.stage.totalRecStatusIcon)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(session.stage.totalRecStatusTint)
@@ -3170,38 +3441,34 @@ private struct SessionSidebarRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-            }
 
-            HStack(spacing: 6) {
-                if session.hasAudio {
-                    SessionSidebarMetaPill(title: "Audio", systemImage: "waveform")
-                }
-                if session.hasTranscript {
-                    SessionSidebarMetaPill(title: "Transcript", systemImage: "text.quote")
-                }
-                if session.hasInsightArtifact {
-                    SessionSidebarMetaPill(title: "Insights", systemImage: "list.bullet.rectangle")
-                }
-                if session.lastError?.isEmpty == false {
-                    SessionSidebarMetaPill(title: "Issue", systemImage: "exclamationmark.triangle")
-                }
+                Spacer(minLength: 6)
+
+                Label(artifactSummary, systemImage: artifactSystemImage)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
     }
-}
 
-private struct SessionSidebarMetaPill: View {
-    let title: String
-    let systemImage: String
+    private var artifactSummary: String {
+        var artifacts: [String] = []
+        if session.hasAudio { artifacts.append("Audio") }
+        if session.hasTranscript { artifacts.append("Text") }
+        if session.hasInsightArtifact { artifacts.append("Insights") }
+        if session.lastError?.isEmpty == false { artifacts.append("Issue") }
+        return artifacts.isEmpty ? "No artifacts" : artifacts.joined(separator: " · ")
+    }
 
-    var body: some View {
-        Label(title, systemImage: systemImage)
-            .font(.caption2)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(Color.secondary.opacity(0.12), in: Capsule())
+    private var artifactSystemImage: String {
+        if session.lastError?.isEmpty == false { return "exclamationmark.triangle" }
+        if session.hasInsightArtifact { return "list.bullet.rectangle" }
+        if session.hasTranscript { return "text.quote" }
+        if session.hasAudio { return "waveform" }
+        return "circle.dashed"
     }
 }
 

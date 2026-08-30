@@ -16,6 +16,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var insightStreamingText = ""
     @Published private(set) var insightRunStartedAt: Date?
     @Published private(set) var isStoppingInsightArtifact = false
+    @Published private(set) var transientNotice: TransientNotice?
     @Published var showPermissionAlert = false
     @Published var insightRunError: String?
     @Published var systemGain: Float = 1.0
@@ -23,14 +24,17 @@ final class AppModel: ObservableObject {
 
     private let store: SessionStore
     private let recorder: any AudioRecording
+    private let recordingFinalizer: any RecordingFinalizing
     private let transcriber: any AudioTranscribing
     private let insightGenerator: any InsightGenerating
     private let defaultInsightSettingsProvider: () -> InsightSettings
     private var insightGenerationTask: Task<Void, Never>?
+    private var transientNoticeDismissalTask: Task<Void, Never>?
 
     init(
         store: SessionStore? = nil,
         recorder: (any AudioRecording)? = nil,
+        recordingFinalizer: (any RecordingFinalizing)? = nil,
         transcriber: (any AudioTranscribing)? = nil,
         insightGenerator: (any InsightGenerating)? = nil,
         defaultInsightSettingsProvider: (() -> InsightSettings)? = nil,
@@ -38,6 +42,7 @@ final class AppModel: ObservableObject {
     ) {
         self.store = store ?? SessionStore()
         self.recorder = recorder ?? SystemAudioRecorder()
+        self.recordingFinalizer = recordingFinalizer ?? RecordingFinalizer()
         self.transcriber = transcriber ?? FileTranscriber()
         self.insightGenerator = insightGenerator ?? InsightGenerationService()
         self.defaultInsightSettingsProvider = defaultInsightSettingsProvider ?? {
@@ -76,6 +81,16 @@ final class AppModel: ObservableObject {
 
     var audioURL: URL? {
         mixedM4AURL
+    }
+
+    var rawCaptureFileState: RecordingCaptureFileState {
+        RecordingArtifactValidator.inspectCaptureFile(at: tempMOVURL)
+    }
+
+    var canRetryRecordingFinalization: Bool {
+        activeSession?.stage == .failed &&
+            activeSession?.mixedAudioFilename == nil &&
+            rawCaptureFileState.canAttemptRecovery
     }
 
     var mixedAudioDuration: TimeInterval? {
@@ -162,6 +177,31 @@ final class AppModel: ObservableObject {
         recoveryNotice = nil
     }
 
+    func showNotice(
+        _ message: String,
+        style: TransientNoticeStyle = .info,
+        autoDismissAfter delay: TimeInterval? = 6
+    ) {
+        transientNoticeDismissalTask?.cancel()
+
+        let notice = TransientNotice(message: message, style: style)
+        transientNotice = notice
+
+        guard let delay, delay > 0 else { return }
+        transientNoticeDismissalTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, self?.transientNotice?.id == notice.id else { return }
+            self?.transientNotice = nil
+            self?.transientNoticeDismissalTask = nil
+        }
+    }
+
+    func dismissTransientNotice() {
+        transientNoticeDismissalTask?.cancel()
+        transientNoticeDismissalTask = nil
+        transientNotice = nil
+    }
+
     func updateInsightSettings(_ settings: InsightSettings) {
         mutateActiveSession { session in
             session.insightSettings = settings
@@ -220,7 +260,10 @@ final class AppModel: ObservableObject {
 
     func selectSession(_ sessionID: UUID) {
         guard canSwitchSessions || activeSession?.id == sessionID else {
-            updateStatus("Finish the current recording or processing task before switching sessions.")
+            showNotice(
+                "Finish the current recording or processing task before switching sessions.",
+                style: .warning
+            )
             return
         }
 
@@ -230,13 +273,16 @@ final class AppModel: ObservableObject {
             setActiveSession(session, persist: recoveryNotice != nil)
             resetTransientRunState()
         } catch {
-            updateStatus("Failed to open session: \(error.localizedDescription)")
+            showNotice("Failed to open session: \(error.localizedDescription)", style: .error)
         }
     }
 
     func showNewSessionWorkspace() {
         guard !hasProtectedActivity else {
-            updateStatus("Finish the current recording or processing task before starting a new workspace.")
+            showNotice(
+                "Finish the current recording or processing task before starting a new workspace.",
+                style: .warning
+            )
             return
         }
 
@@ -249,7 +295,10 @@ final class AppModel: ObservableObject {
 
     func deleteSession(_ sessionID: UUID) {
         guard canSwitchSessions || activeSession?.id != sessionID else {
-            updateStatus("Finish the current recording or processing task before deleting a session.")
+            showNotice(
+                "Finish the current recording or processing task before deleting a session.",
+                style: .warning
+            )
             return
         }
 
@@ -273,7 +322,47 @@ final class AppModel: ObservableObject {
                 refreshRecentSessions()
             }
         } catch {
-            updateStatus("Failed to delete session: \(error.localizedDescription)")
+            showNotice("Failed to delete session: \(error.localizedDescription)", style: .error)
+        }
+    }
+
+    @discardableResult
+    func renameSession(_ sessionID: UUID, to proposedTitle: String) -> Bool {
+        let normalizedTitle = proposedTitle
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        guard !normalizedTitle.isEmpty else {
+            showNotice("Session title cannot be empty.", style: .warning)
+            return false
+        }
+
+        if activeSession?.id == sessionID {
+            guard activeSession?.displayTitle != normalizedTitle else { return true }
+            mutateActiveSession { session in
+                session.title = normalizedTitle
+            }
+            showNotice("Session renamed.", style: .success)
+            return true
+        }
+
+        do {
+            guard var session = try store.loadSession(id: sessionID) else {
+                showNotice("The session could not be found.", style: .error)
+                return false
+            }
+            guard session.displayTitle != normalizedTitle else { return true }
+
+            session.title = normalizedTitle
+            session.updatedAt = Date()
+            try store.save(session, makeCurrent: false)
+            refreshRecentSessions()
+            showNotice("Session renamed.", style: .success)
+            return true
+        } catch {
+            showNotice("Failed to rename session: \(error.localizedDescription)", style: .error)
+            return false
         }
     }
 
@@ -307,7 +396,7 @@ final class AppModel: ObservableObject {
         guard var transcript = activeSession?.transcriptState else { return false }
         guard transcript.consolidateConsecutiveSpeakers() else { return false }
         updateTranscript(transcript)
-        updateStatus("Consolidated consecutive speaker turns.")
+        updateWorkflowStatus("Consolidated consecutive speaker turns.")
         return true
     }
 
@@ -318,7 +407,7 @@ final class AppModel: ObservableObject {
         transcript.resetAliases()
         guard transcript.plainTextExport != before else { return false }
         updateTranscript(transcript)
-        updateStatus("Speaker aliases reset.")
+        updateWorkflowStatus("Speaker aliases reset.")
         return true
     }
 
@@ -364,34 +453,41 @@ final class AppModel: ObservableObject {
         guard isRecording || activeSession?.stage == .mixingDown else { return false }
         resetInsightRunState()
 
-        updateStatus("Stopping recording...")
+        updateWorkflowStatus("Stopping recording...")
 
         do {
-            _ = try await stopRecorder()
+            let captureURL = try await stopRecorder()
             mutateActiveSession { session in
                 session.stage = .mixingDown
                 session.statusMessage = "Mixing down recording..."
                 session.recordingStoppedAt = Date()
             }
-
-            guard let session = activeSession, let movieURL = tempMOVURL else {
-                throw NSError(domain: "TotalRec.AppModel", code: -100, userInfo: [NSLocalizedDescriptionKey: "Missing captured recording data."])
-            }
-
-            let audioURL = try store.mixedAudioURL(for: session)
-            try await mixDown(sourceMOV: movieURL, outputM4A: audioURL, systemGain: systemGain, micGain: micGain)
-            let duration = try? await AVURLAsset(url: audioURL).load(.duration).seconds
-
-            mutateActiveSession { current in
-                current.mixedAudioFilename = audioURL.lastPathComponent
-                current.mixedAudioDuration = duration
-                current.stage = .readyToTranscribe
-                current.statusMessage = "Recording saved. Ready to transcribe."
-                current.lastError = nil
-            }
+            try await finalizeRecordingCapture(at: captureURL)
             return true
         } catch {
             markCurrentSessionFailed("Stop failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func retryRecordingFinalization() async -> Bool {
+        guard canRetryRecordingFinalization, let captureURL = tempMOVURL else {
+            return false
+        }
+
+        resetInsightRunState()
+        mutateActiveSession { session in
+            session.stage = .mixingDown
+            session.statusMessage = "Recovering audio from raw capture..."
+            session.lastError = nil
+        }
+
+        do {
+            try await finalizeRecordingCapture(at: captureURL)
+            return true
+        } catch {
+            markCurrentSessionFailed("Recovery failed: \(error.localizedDescription)")
             return false
         }
     }
@@ -616,10 +712,6 @@ final class AppModel: ObservableObject {
         return "Ready"
     }
 
-    func setStatusMessage(_ statusMessage: String) {
-        updateStatus(statusMessage)
-    }
-
     private func importAudio(
         description: String,
         importer: @escaping (RecordingSession) async throws -> URL
@@ -672,10 +764,9 @@ final class AppModel: ObservableObject {
         refreshRecentSessions()
     }
 
-    private func updateStatus(_ statusMessage: String) {
+    private func updateWorkflowStatus(_ statusMessage: String) {
         mutateActiveSession { session in
             session.statusMessage = statusMessage
-            session.updatedAt = Date()
         }
     }
 
@@ -830,6 +921,7 @@ final class AppModel: ObservableObject {
     private func resetTransientRunState() {
         processingPreviewText = ""
         resetInsightRunState()
+        dismissTransientNotice()
     }
 
     private func stopRecorder() async throws -> URL {
@@ -840,16 +932,26 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func mixDown(sourceMOV: URL, outputM4A: URL, systemGain: Float, micGain: Float) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            Mixdown.toM4A(
-                sourceMOV: sourceMOV,
-                outputM4A: outputM4A,
-                systemGain: systemGain,
-                micGain: micGain
-            ) { result in
-                continuation.resume(with: result.map { _ in () })
-            }
+    private func finalizeRecordingCapture(at captureURL: URL) async throws {
+        guard let session = activeSession else {
+            throw RecordingRecoveryError.missingCapture
+        }
+
+        let audioURL = try store.mixedAudioURL(for: session)
+        let duration = try await recordingFinalizer.finalizeCapture(
+            at: captureURL,
+            outputURL: audioURL,
+            systemGain: systemGain,
+            micGain: micGain
+        )
+
+        mutateActiveSession { current in
+            current.mixedAudioFilename = audioURL.lastPathComponent
+            current.mixedAudioDuration = duration
+            current.stage = .readyToTranscribe
+            current.statusMessage = "Recording saved. Ready to transcribe."
+            current.lastError = nil
+            current.recordingStoppedAt = current.recordingStoppedAt ?? Date()
         }
     }
 
@@ -874,7 +976,7 @@ final class AppModel: ObservableObject {
         let totalChunks = chunks.count
 
         for (index, chunk) in chunks.enumerated() {
-            updateStatus(totalChunks > 1 ? "Transcribing chunk \(index + 1)/\(totalChunks)..." : "Transcribing...")
+            updateWorkflowStatus(totalChunks > 1 ? "Transcribing chunk \(index + 1)/\(totalChunks)..." : "Transcribing...")
             let text = try await transcribeAppleChunk(
                 audioURL: chunk.url,
                 onDevicePreferred: onDevicePreferred,
@@ -887,7 +989,7 @@ final class AppModel: ObservableObject {
         }
 
         if totalChunks > 1 {
-            updateStatus("Transcription complete. (Apple, \(totalChunks) chunks)")
+            updateWorkflowStatus("Transcription complete. (Apple, \(totalChunks) chunks)")
         }
 
         return AppleTranscriptionResult(
@@ -941,7 +1043,7 @@ final class AppModel: ObservableObject {
         var combinedState = TranscriptState()
         let totalChunks = chunks.count
         for (index, chunk) in chunks.enumerated() {
-            updateStatus(totalChunks > 1 ? "Transcribing chunk \(index + 1)/\(totalChunks)..." : "Transcribing...")
+            updateWorkflowStatus(totalChunks > 1 ? "Transcribing chunk \(index + 1)/\(totalChunks)..." : "Transcribing...")
 
             let chunkState = try await Self.transcribeOpenAIChunkOffMain(
                 audioURL: chunk.url,
@@ -952,7 +1054,7 @@ final class AppModel: ObservableObject {
         }
 
         if totalChunks > 1 {
-            updateStatus("Transcription complete. (OpenAI, \(totalChunks) chunks)")
+            updateWorkflowStatus("Transcription complete. (OpenAI, \(totalChunks) chunks)")
         }
         return combinedState
     }

@@ -17,6 +17,7 @@ struct RecordingSessionSummary: Codable, Identifiable, Equatable {
     let id: UUID
     let createdAt: Date
     let updatedAt: Date
+    let title: String?
     let sourceDescription: String
     let stage: SessionStage
     let statusMessage: String
@@ -28,6 +29,11 @@ struct RecordingSessionSummary: Codable, Identifiable, Equatable {
 
     var hasMeetingNotes: Bool {
         hasInsightArtifact
+    }
+
+    var displayTitle: String {
+        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedTitle.isEmpty ? sourceDescription : trimmedTitle
     }
 
     var hasProtectedActivity: Bool {
@@ -43,6 +49,7 @@ struct RecordingSessionSummary: Codable, Identifiable, Equatable {
         case id
         case createdAt
         case updatedAt
+        case title
         case sourceDescription
         case stage
         case statusMessage
@@ -58,6 +65,7 @@ struct RecordingSessionSummary: Codable, Identifiable, Equatable {
         id: UUID,
         createdAt: Date,
         updatedAt: Date,
+        title: String? = nil,
         sourceDescription: String,
         stage: SessionStage,
         statusMessage: String,
@@ -70,6 +78,7 @@ struct RecordingSessionSummary: Codable, Identifiable, Equatable {
         self.id = id
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.title = title
         self.sourceDescription = sourceDescription
         self.stage = stage
         self.statusMessage = statusMessage
@@ -85,6 +94,7 @@ struct RecordingSessionSummary: Codable, Identifiable, Equatable {
         self.id = try container.decode(UUID.self, forKey: .id)
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
         self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        self.title = try container.decodeIfPresent(String.self, forKey: .title)
         self.sourceDescription = try container.decode(String.self, forKey: .sourceDescription)
         self.stage = try container.decode(SessionStage.self, forKey: .stage)
         self.statusMessage = try container.decode(String.self, forKey: .statusMessage)
@@ -102,6 +112,7 @@ struct RecordingSessionSummary: Codable, Identifiable, Equatable {
         try container.encode(id, forKey: .id)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(title, forKey: .title)
         try container.encode(sourceDescription, forKey: .sourceDescription)
         try container.encode(stage, forKey: .stage)
         try container.encode(statusMessage, forKey: .statusMessage)
@@ -117,6 +128,7 @@ struct RecordingSession: Codable, Identifiable {
     let id: UUID
     var createdAt: Date
     var updatedAt: Date
+    var title: String?
     var sourceDescription: String
     var sessionDirectoryName: String
     var captureMovieFilename: String?
@@ -144,6 +156,7 @@ struct RecordingSession: Codable, Identifiable {
         self.id = id
         self.createdAt = now
         self.updatedAt = now
+        self.title = nil
         self.sourceDescription = sourceDescription
         self.sessionDirectoryName = id.uuidString
         self.captureMovieFilename = nil
@@ -176,11 +189,17 @@ struct RecordingSession: Codable, Identifiable {
         insightArtifact?.hasContent == true
     }
 
+    var displayTitle: String {
+        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedTitle.isEmpty ? sourceDescription : trimmedTitle
+    }
+
     var summary: RecordingSessionSummary {
         RecordingSessionSummary(
             id: id,
             createdAt: createdAt,
             updatedAt: updatedAt,
+            title: title,
             sourceDescription: sourceDescription,
             stage: stage,
             statusMessage: statusMessage,
@@ -196,6 +215,7 @@ struct RecordingSession: Codable, Identifiable {
         case id
         case createdAt
         case updatedAt
+        case title
         case sourceDescription
         case sessionDirectoryName
         case captureMovieFilename
@@ -218,6 +238,7 @@ struct RecordingSession: Codable, Identifiable {
         self.id = try container.decode(UUID.self, forKey: .id)
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
         self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        self.title = try container.decodeIfPresent(String.self, forKey: .title)
         self.sourceDescription = try container.decodeIfPresent(String.self, forKey: .sourceDescription) ?? "Session"
         self.sessionDirectoryName = try container.decodeIfPresent(String.self, forKey: .sessionDirectoryName) ?? id.uuidString
         self.captureMovieFilename = try container.decodeIfPresent(String.self, forKey: .captureMovieFilename)
@@ -260,6 +281,7 @@ struct RecordingSession: Codable, Identifiable {
         try container.encode(id, forKey: .id)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(title, forKey: .title)
         try container.encode(sourceDescription, forKey: .sourceDescription)
         try container.encode(sessionDirectoryName, forKey: .sessionDirectoryName)
         try container.encodeIfPresent(captureMovieFilename, forKey: .captureMovieFilename)

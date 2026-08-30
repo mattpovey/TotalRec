@@ -87,7 +87,7 @@ struct MenuBarRecorderView: View {
             if let session = appModel.activeSession, session.hasUserData {
                 Divider()
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(session.sourceDescription)
+                    Text(session.displayTitle)
                         .font(.subheadline)
                     if let error = session.lastError, !error.isEmpty {
                         Text(error)

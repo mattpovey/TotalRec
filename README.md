@@ -64,6 +64,11 @@ xcodebuild test \
 
 GitHub Actions runs the same build and test flow on the `macos-26` runner.
 
+The command above deliberately disables signing for CI-style tests. Do not launch that
+unsigned app bundle for interactive QA when it uses your normal TotalRec configuration:
+macOS may treat each rebuild as a different requester for the existing Keychain items.
+For interactive testing, run the normally signed `TotalRec` scheme from Xcode.
+
 ## Configuration
 ### Transcription Provider
 Choose between:
@@ -153,6 +158,7 @@ If recording fails to start, check System Settings → Privacy & Security → Sc
 
 ## Troubleshooting
 - “Screen capture permission required”: Grant Screen Recording permission and retry.
+- Repeated Keychain authorization prompts during development: Quit any unsigned TotalRec build and run the normally signed `TotalRec` scheme from Xcode. The app caches each credential lookup for its lifetime, so a single process should not request the same item repeatedly.
 - OpenAI transcription disabled: Ensure API key is set and no partially filled Known Speakers rows remain.
 - Long audio: Try `Auto` chunking with OpenAI.
 - TScript models unavailable: Verify the server URL, refresh models, and confirm the selected model is runtime-available.

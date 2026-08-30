@@ -2,6 +2,20 @@ import Foundation
 import AVFoundation
 import ScreenCaptureKit
 
+private enum SystemAudioRecorderError: LocalizedError {
+    case noActiveRecording
+    case finalizationFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .noActiveRecording:
+            return "There is no active recording to stop."
+        case let .finalizationFailed(reason):
+            return "The raw capture could not be finalized: \(reason)"
+        }
+    }
+}
+
 protocol AudioRecording: AnyObject {
     func startRecording(to url: URL, onPermissionNeeded: @escaping () -> Void) async throws
     func stopRecording(completion: @escaping (Result<URL, Error>) -> Void)
@@ -97,7 +111,7 @@ final class SystemAudioRecorder: NSObject, AudioRecording, SCStreamOutput, AVCap
 
     func stopRecording(completion: @escaping (Result<URL, Error>) -> Void) {
         guard let writer = writer else {
-            completion(.failure(NSError(domain: "Recorder", code: -40))); return
+            completion(.failure(SystemAudioRecorderError.noActiveRecording)); return
         }
 
         let group = DispatchGroup()
@@ -122,7 +136,8 @@ final class SystemAudioRecorder: NSObject, AudioRecording, SCStreamOutput, AVCap
                 if writer.status == .completed {
                     completion(.success(url))
                 } else {
-                    completion(.failure(writer.error ?? NSError(domain: "Writer", code: -41)))
+                    let reason = writer.error?.localizedDescription ?? "the media writer ended in state \(writer.status.rawValue)"
+                    completion(.failure(SystemAudioRecorderError.finalizationFailed(reason)))
                 }
             }
         }

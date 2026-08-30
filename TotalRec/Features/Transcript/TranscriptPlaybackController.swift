@@ -73,6 +73,12 @@ final class TranscriptPlaybackController: ObservableObject, AudioPlaybackEngineD
         selectedSegmentID = segmentID
     }
 
+    func selectFirstAvailableSegment(from segmentIDs: [UUID]) {
+        guard selectedSegmentID == nil else { return }
+        guard let firstAvailableID = segmentIDs.first(where: { transcript.segment(withID: $0) != nil }) else { return }
+        selectedSegmentID = firstAvailableID
+    }
+
     func playSelectedClip() {
         playSelectedClip(contextPadding: 0)
     }

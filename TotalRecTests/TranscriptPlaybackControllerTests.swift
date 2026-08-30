@@ -142,6 +142,39 @@ final class TranscriptPlaybackControllerTests: XCTestCase {
         XCTAssertEqual(controller.activeSegmentID, transcript.segments[0].id)
     }
 
+    func testSelectFirstAvailableSegmentUsesVisibleOrderAndDoesNotStartPlayback() {
+        let engine = FakeAudioPlaybackEngine(duration: 12)
+        let controller = TranscriptPlaybackController(engine: engine)
+        retainForTestProcess(engine, controller)
+        let transcript = makeTranscript()
+        let missingID = UUID()
+
+        controller.updateSession(
+            audioURL: URL(fileURLWithPath: "/tmp/audio.m4a"),
+            audioDuration: 12,
+            transcript: transcript
+        )
+        let seekCountAfterLoadingAudio = engine.seekHistory.count
+        controller.selectFirstAvailableSegment(from: [missingID, transcript.segments[1].id, transcript.segments[0].id])
+
+        XCTAssertEqual(controller.selectedSegmentID, transcript.segments[1].id)
+        XCTAssertFalse(controller.isPlaying)
+        XCTAssertEqual(engine.seekHistory.count, seekCountAfterLoadingAudio)
+    }
+
+    func testSelectFirstAvailableSegmentKeepsExistingSelection() {
+        let engine = FakeAudioPlaybackEngine(duration: 12)
+        let controller = TranscriptPlaybackController(engine: engine)
+        retainForTestProcess(engine, controller)
+        let transcript = makeTranscript()
+
+        controller.updateSession(audioURL: nil, audioDuration: 12, transcript: transcript)
+        controller.selectSegment(transcript.segments[1].id)
+        controller.selectFirstAvailableSegment(from: transcript.segments.map(\.id))
+
+        XCTAssertEqual(controller.selectedSegmentID, transcript.segments[1].id)
+    }
+
     private func makeTranscript() -> TranscriptState {
         TranscriptState(
             segments: [

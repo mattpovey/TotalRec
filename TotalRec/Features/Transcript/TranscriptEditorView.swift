@@ -11,10 +11,12 @@ struct TranscriptEditorView: View {
     @State private var replaceStatusMessage: String?
     @State private var showMatchingClipsOnly = false
     @State private var rawTextDraft = ""
+    @State private var isFindReplaceExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             TranscriptFindReplaceCard(
+                isExpanded: $isFindReplaceExpanded,
                 searchText: $searchText,
                 replacementText: $replacementText,
                 showMatchingClipsOnly: $showMatchingClipsOnly,
@@ -120,6 +122,7 @@ struct TranscriptEditorView: View {
 }
 
 private struct TranscriptFindReplaceCard: View {
+    @Binding var isExpanded: Bool
     @Binding var searchText: String
     @Binding var replacementText: String
     @Binding var showMatchingClipsOnly: Bool
@@ -131,61 +134,77 @@ private struct TranscriptFindReplaceCard: View {
 
     var body: some View {
         TranscriptSurfacePanel(
-            title: "Find and Replace",
-            subtitle: "Apply literal, case-sensitive replacements across the current transcript."
+            title: "Transcript Tools",
+            subtitle: "Open secondary tools only when you need a transcript-wide change."
         ) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Find")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        TextField("Search transcript text", text: $searchText)
-                            .textFieldStyle(.roundedBorder)
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Replace")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        TextField("Replacement text", text: $replacementText)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                }
-
-                HStack(spacing: 10) {
-                    Text(matchCount == 1 ? "1 match" : "\(matchCount) matches")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    if canFilterClips, !searchText.isEmpty {
-                        Toggle(isOn: $showMatchingClipsOnly) {
-                            Text(matchingClipCount == 1 ? "Show 1 matching clip" : "Show \(matchingClipCount) matching clips")
-                                .font(.caption)
+            DisclosureGroup(isExpanded: $isExpanded) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Find")
+                                .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
+                            TextField("Search transcript text", text: $searchText)
+                                .textFieldStyle(.roundedBorder)
                         }
-                        .toggleStyle(.checkbox)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Replace")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            TextField("Replacement text", text: $replacementText)
+                                .textFieldStyle(.roundedBorder)
+                        }
                     }
 
-                    Button("Replace All", action: onReplaceAll)
-                        .totalRecGlassButton(prominent: true)
-                        .disabled(searchText.isEmpty || matchCount == 0)
+                    HStack(spacing: 10) {
+                        Text(matchCount == 1 ? "1 match" : "\(matchCount) matches")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
 
-                    Button("Clear") {
-                        searchText = ""
-                        replacementText = ""
-                        showMatchingClipsOnly = false
+                        if canFilterClips, !searchText.isEmpty {
+                            Toggle(isOn: $showMatchingClipsOnly) {
+                                Text(matchingClipCount == 1 ? "Show 1 matching clip" : "Show \(matchingClipCount) matching clips")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .toggleStyle(.checkbox)
+                        }
+
+                        Button("Replace All", action: onReplaceAll)
+                            .totalRecGlassButton(prominent: true)
+                            .disabled(searchText.isEmpty || matchCount == 0)
+
+                        Button("Clear") {
+                            searchText = ""
+                            replacementText = ""
+                            showMatchingClipsOnly = false
+                        }
+                        .totalRecGlassButton()
+                        .disabled(searchText.isEmpty && replacementText.isEmpty)
+
+                        Spacer(minLength: 0)
                     }
-                    .totalRecGlassButton()
-                    .disabled(searchText.isEmpty && replacementText.isEmpty)
 
-                    Spacer(minLength: 0)
+                    if let statusMessage, !statusMessage.isEmpty {
+                        Text(statusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .padding(.top, 10)
+            } label: {
+                HStack(spacing: 8) {
+                    Label("Find and Replace", systemImage: "text.magnifyingglass")
+                        .font(.subheadline.weight(.semibold))
 
-                if let statusMessage, !statusMessage.isEmpty {
-                    Text(statusMessage)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+
+                    if !searchText.isEmpty {
+                        Text(matchCount == 1 ? "1 match" : "\(matchCount) matches")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
