@@ -69,6 +69,24 @@ unsigned app bundle for interactive QA when it uses your normal TotalRec configu
 macOS may treat each rebuild as a different requester for the existing Keychain items.
 For interactive testing, run the normally signed `TotalRec` scheme from Xcode.
 
+## Distribution
+
+To ship TotalRec to other Macs, build a universal Release app signed with a
+Developer ID Application certificate and distribute it in an Apple-notarized
+disk image. The repository includes a workflow that archives, exports, packages,
+notarizes, staples, and validates the release:
+
+```sh
+scripts/release.sh --preflight
+scripts/release.sh
+```
+
+This requires Apple Developer Program access, a Developer ID Application
+certificate, and a `notarytool` Keychain profile. See
+[docs/distribution.md](docs/distribution.md) for setup and clean-Mac acceptance
+testing. API keys, permissions, saved sessions, and provider settings remain
+per-machine and are not included in the disk image.
+
 ## Configuration
 ### Transcription Provider
 Choose between:
